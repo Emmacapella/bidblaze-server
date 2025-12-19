@@ -11,12 +11,15 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// --- SILENT GAME STATE ---
+// --- CONSTANTS ---
+// Fix: Set exactly 299 seconds (4 minutes 59 seconds)
+const GAME_DURATION_MS = 299 * 1000; 
+
+// --- GAME STATE ---
 let gameState = {
   status: 'ACTIVE',
   jackpot: 1250,
-  // We use "endTime" (Target Time) instead of counting down seconds
-  endTime: Date.now() + 300000, 
+  endTime: Date.now() + GAME_DURATION_MS,
   bidCost: 1,
   bidCount: 0,
   lastBidder: "No bids yet",
@@ -29,8 +32,9 @@ setInterval(() => {
   
   if (gameState.status === 'ACTIVE' && timeLeft <= 0) {
     gameState.status = 'ENDED';
-    io.emit('gameState', gameState); // Only speak if game ends
+    io.emit('gameState', gameState);
     
+    // Wait 30s then reset
     setTimeout(() => {
       resetGame();
     }, 30000);
@@ -40,7 +44,7 @@ setInterval(() => {
 function resetGame() {
   gameState.status = 'ACTIVE';
   gameState.jackpot = 1250;
-  gameState.endTime = Date.now() + 300000;
+  gameState.endTime = Date.now() + GAME_DURATION_MS;
   gameState.bidCost = 1;
   gameState.bidCount = 0;
   gameState.lastBidder = "No bids yet";
@@ -69,9 +73,15 @@ io.on('connection', (socket) => {
     gameState.lastBidder = userEmail;
     gameState.bidCost++;
 
-    // --- RESET TIMER ---
-    // Push the target time 5 minutes into the future
-    gameState.endTime = Date.now() + 300000; 
+    // --- LOGIC FIX ---
+    const now = Date.now();
+    const timeRemaining = gameState.endTime - now;
+
+    // RULE: Only add 10 seconds if we are under 20 seconds.
+    // If we are above 20s, do NOT change the time.
+    if (timeRemaining < 20000) {
+      gameState.endTime += 10000; 
+    }
 
     io.emit('gameState', gameState);
   });

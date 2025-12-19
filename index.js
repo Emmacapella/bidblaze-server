@@ -46,11 +46,11 @@ setInterval(() => {
 
 function resetGame() {
   gameState.status = 'ACTIVE';
-  gameState.jackpot = 0; // Reset to 0 (or a seed amount like $10)
+  gameState.jackpot = 0; 
   gameState.endTime = Date.now() + GAME_DURATION_MS;
   gameState.bidCost = BID_FEE;
   gameState.bidCount = 0;
-  gameState.lastBidder: "No bids yet";
+  gameState.lastBidder = "No bids yet"; // FIXED THIS LINE
   gameState.history = [];
   io.emit('gameState', gameState);
 }
@@ -64,7 +64,7 @@ io.on('connection', (socket) => {
     // 1. UPDATE MONEY
     gameState.bidCount++;
     gameState.jackpot += (BID_FEE * JACKPOT_SHARE); // Add $0.70
-    gameState.devWallet += (BID_FEE * DEV_SHARE);   // Add $0.30 (Hidden from user)
+    gameState.devWallet += (BID_FEE * DEV_SHARE);   // Add $0.30 
 
     // 2. LOG ENTRY
     const newBid = {
@@ -86,8 +86,7 @@ io.on('connection', (socket) => {
 
     io.emit('gameState', gameState);
     
-    // Console log for you to see your profits
-    console.log(`Bid Placed! Jackpot: $${gameState.jackpot.toFixed(2)} | Your Profit: $${gameState.devWallet.toFixed(2)}`);
+    console.log(`Bid Placed! Jackpot: $${gameState.jackpot.toFixed(2)}`);
   });
 });
 

@@ -11,67 +11,52 @@ const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// --- MASTER GAME STATE ---
+// --- SILENT GAME STATE ---
 let gameState = {
-  status: 'ACTIVE', // Can be 'ACTIVE' or 'ENDED'
+  status: 'ACTIVE',
   jackpot: 1250,
-  timeLeft: 299,
+  // We use "endTime" (Target Time) instead of counting down seconds
+  endTime: Date.now() + 300000, 
   bidCost: 1,
   bidCount: 0,
   lastBidder: "No bids yet",
   history: []
 };
 
-// --- HELPER: RESET GAME ---
+// --- CHECK GAME OVER (Internal Loop) ---
+setInterval(() => {
+  const timeLeft = Math.max(0, Math.ceil((gameState.endTime - Date.now()) / 1000));
+  
+  if (gameState.status === 'ACTIVE' && timeLeft <= 0) {
+    gameState.status = 'ENDED';
+    io.emit('gameState', gameState); // Only speak if game ends
+    
+    setTimeout(() => {
+      resetGame();
+    }, 30000);
+  }
+}, 1000);
+
 function resetGame() {
-  console.log("Starting New Round...");
   gameState.status = 'ACTIVE';
   gameState.jackpot = 1250;
-  gameState.timeLeft = 299;
+  gameState.endTime = Date.now() + 300000;
   gameState.bidCost = 1;
   gameState.bidCount = 0;
   gameState.lastBidder = "No bids yet";
   gameState.history = [];
-  io.emit('gameState', gameState); // Tell everyone new game started
+  io.emit('gameState', gameState);
 }
 
-// --- CLOCK LOOP ---
-setInterval(() => {
-  if (gameState.status === 'ACTIVE') {
-    if (gameState.timeLeft > 0) {
-      gameState.timeLeft--;
-      io.emit('timerUpdate', gameState.timeLeft);
-    } else {
-      // TIME IS UP! GAME OVER.
-      gameState.status = 'ENDED';
-      io.emit('gameState', gameState); // Notify frontend (Game Over)
-      
-      console.log("Game Ended! Waiting 30s...");
-      
-      // Wait 30 Seconds, then Restart
-      setTimeout(() => {
-        resetGame();
-      }, 30000); 
-    }
-  }
-}, 1000);
-
-// --- SOCKET CONNECTION ---
 io.on('connection', (socket) => {
   socket.emit('gameState', gameState);
 
   socket.on('placeBid', (userEmail) => {
-    // REJECT BID IF GAME IS OVER
     if (gameState.status !== 'ACTIVE') return;
 
     gameState.bidCount++;
-    
-    // Jackpot Logic
-    if (gameState.bidCount % 5 === 0) {
-      gameState.jackpot += 2;
-    }
+    if (gameState.bidCount % 5 === 0) gameState.jackpot += 2;
 
-    // History Logic
     const newBid = {
       id: Date.now(),
       amount: gameState.bidCost,
@@ -84,18 +69,15 @@ io.on('connection', (socket) => {
     gameState.lastBidder = userEmail;
     gameState.bidCost++;
 
-    // --- FIXED TIMER LOGIC ---
-    // If under 20s, add 10s.
-    if (gameState.timeLeft < 20) {
-      gameState.timeLeft += 10;
-    }
+    // --- RESET TIMER ---
+    // Push the target time 5 minutes into the future
+    gameState.endTime = Date.now() + 300000; 
 
-    // Broadcast Update
     io.emit('gameState', gameState);
   });
 });
 
 server.listen(3001, () => {
-  console.log('SERVER IS RUNNING ON PORT 3001 🚀');
+  console.log('SILENT SERVER RUNNING ON 3001 🚀');
 });
 

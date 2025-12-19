@@ -12,21 +12,24 @@ const io = new Server(server, {
 });
 
 // --- CONSTANTS ---
-// Fix: Set exactly 299 seconds (4 minutes 59 seconds)
-const GAME_DURATION_MS = 299 * 1000; 
+const GAME_DURATION_MS = 299 * 1000; // 5 Minutes
+const BID_FEE = 1.00;     // 1 USDC
+const JACKPOT_SHARE = 0.70; // 70% goes to winner
+const DEV_SHARE = 0.30;     // 30% goes to you
 
 // --- GAME STATE ---
 let gameState = {
   status: 'ACTIVE',
-  jackpot: 1250,
+  jackpot: 0.00, // Starts at $0 (Progressive)
+  devWallet: 0.00, // Tracks your earnings
   endTime: Date.now() + GAME_DURATION_MS,
-  bidCost: 1,
+  bidCost: BID_FEE,
   bidCount: 0,
   lastBidder: "No bids yet",
   history: []
 };
 
-// --- CHECK GAME OVER (Internal Loop) ---
+// --- INTERNAL LOOP ---
 setInterval(() => {
   const timeLeft = Math.max(0, Math.ceil((gameState.endTime - Date.now()) / 1000));
   
@@ -43,11 +46,11 @@ setInterval(() => {
 
 function resetGame() {
   gameState.status = 'ACTIVE';
-  gameState.jackpot = 1250;
+  gameState.jackpot = 0; // Reset to 0 (or a seed amount like $10)
   gameState.endTime = Date.now() + GAME_DURATION_MS;
-  gameState.bidCost = 1;
+  gameState.bidCost = BID_FEE;
   gameState.bidCount = 0;
-  gameState.lastBidder = "No bids yet";
+  gameState.lastBidder: "No bids yet";
   gameState.history = [];
   io.emit('gameState', gameState);
 }
@@ -58,36 +61,37 @@ io.on('connection', (socket) => {
   socket.on('placeBid', (userEmail) => {
     if (gameState.status !== 'ACTIVE') return;
 
+    // 1. UPDATE MONEY
     gameState.bidCount++;
-    if (gameState.bidCount % 5 === 0) gameState.jackpot += 2;
+    gameState.jackpot += (BID_FEE * JACKPOT_SHARE); // Add $0.70
+    gameState.devWallet += (BID_FEE * DEV_SHARE);   // Add $0.30 (Hidden from user)
 
+    // 2. LOG ENTRY
     const newBid = {
       id: Date.now(),
-      amount: gameState.bidCost,
+      amount: BID_FEE,
       time: new Date().toLocaleTimeString(),
       user: userEmail || "Anonymous"
     };
     gameState.history.unshift(newBid);
     gameState.history = gameState.history.slice(0, 5);
-
     gameState.lastBidder = userEmail;
-    gameState.bidCost++;
 
-    // --- LOGIC FIX ---
+    // 3. UPDATE TIME (Under 20s Rule)
     const now = Date.now();
     const timeRemaining = gameState.endTime - now;
-
-    // RULE: Only add 10 seconds if we are under 20 seconds.
-    // If we are above 20s, do NOT change the time.
     if (timeRemaining < 20000) {
       gameState.endTime += 10000; 
     }
 
     io.emit('gameState', gameState);
+    
+    // Console log for you to see your profits
+    console.log(`Bid Placed! Jackpot: $${gameState.jackpot.toFixed(2)} | Your Profit: $${gameState.devWallet.toFixed(2)}`);
   });
 });
 
 server.listen(3001, () => {
-  console.log('SILENT SERVER RUNNING ON 3001 🚀');
+  console.log('NO-LOSS SERVER RUNNING ON 3001 🚀');
 });
 

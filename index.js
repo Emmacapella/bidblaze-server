@@ -80,7 +80,7 @@ io.on('connection', (socket) => {
     // 3. UPDATE TIME (Under 20s Rule)
     const now = Date.now();
     const timeRemaining = gameState.endTime - now;
-    if (timeRemaining < 20000) {
+    if (timeRemaining < 5000) {
       gameState.endTime += 10000; 
     }
 

@@ -117,11 +117,27 @@ io.on('connection', (socket) => {
   });
 });
 
-// Timer Loop
+// --- AUTO-RESTART LOOP (15 Seconds) ---
 setInterval(() => {
-    if (gameState.status === 'ACTIVE' && Date.now() > gameState.endTime) {
+    const now = Date.now();
+
+    // 1. Check if Game Should End
+    if (gameState.status === 'ACTIVE' && now > gameState.endTime) {
         gameState.status = 'ENDED';
-        gameState.endTime = Date.now();
+        gameState.endTime = now; // Freeze main timer
+        gameState.restartTimer = now + 15000; // Set restart for 15s later
+        io.emit('gameState', gameState);
+    }
+
+    // 2. Check if Game Should Restart
+    if (gameState.status === 'ENDED' && now > gameState.restartTimer) {
+        gameState.jackpot = 100.00;
+        gameState.endTime = now + 60000; // New 60s timer
+        gameState.history = [];
+        gameState.status = 'ACTIVE';
+        gameState.lastBidder = null;
+        gameState.restartTimer = 0;
+        console.log("🔄 Game Auto-Restarted!");
         io.emit('gameState', gameState);
     }
 }, 1000);

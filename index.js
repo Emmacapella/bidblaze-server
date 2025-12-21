@@ -74,7 +74,7 @@ io.on('connection', (socket) => {
       user: userEmail || "Anonymous"
     };
     gameState.history.unshift(newBid);
-    gameState.history = gameState.history.slice(0, 5);
+    gameState.history = gameState.history.slice(0, 30);
     gameState.lastBidder = userEmail;
 
     // 3. SMART TIMER LOGIC (5 Second Rule)

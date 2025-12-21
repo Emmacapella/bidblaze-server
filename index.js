@@ -9,7 +9,7 @@ app.use(cors());
 
 // --- 🏦 BANK CONFIGURATION (SUPABASE) ---
 const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
-const SUPABASE_KEY = "Sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; // Your Secret Key
+const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; // Your Secret Key
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const server = http.createServer(app);

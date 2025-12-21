@@ -31,6 +31,7 @@ let adminLockedUntil = 0;
 let gameState = {
   jackpot: 0.00,        
   houseBalance: 0.00,
+  bidCost: BID_FEE,
   endTime: Date.now() + 299000, // 299 Seconds
   status: 'ACTIVE',
   lastBidder: null,

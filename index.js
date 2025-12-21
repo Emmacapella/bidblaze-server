@@ -82,7 +82,7 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- 🔒 SECURE DEPOSIT HANDLER (Using Ethers) ---
+  // --- 🔒 SECURE DEPOSIT HANDLER (With Error Replies) ---
   socket.on('confirmDeposit', async (data) => {
       const { email, txHash } = data;
       console.log(`🔍 Verifying TX: ${txHash}...`);
@@ -91,21 +91,21 @@ io.on('connection', (socket) => {
           // 1. Check Replay (DB)
           const { data: existing } = await supabase.from('deposits').select('*').eq('id', txHash).single();
           if (existing) {
-              console.log("⚠️ REJECTED: Transaction already used.");
+              socket.emit('depositError', '⚠️ Receipt already used!');
               return;
           }
 
-          // 2. ASK BLOCKCHAIN (Verify Real Amount)
+          // 2. ASK BLOCKCHAIN
           const tx = await provider.getTransaction(txHash);
           
           if (!tx) {
-             console.log("⚠️ REJECTED: Transaction not found yet.");
+             socket.emit('depositError', '❌ Transaction not found. Wait a moment?');
              return;
           }
 
           // Check Receiver
           if (tx.to.toLowerCase() !== TREASURY_ADDRESS) {
-              console.log(`⚠️ REJECTED: Money sent to ${tx.to}, expected ${TREASURY_ADDRESS}`);
+              socket.emit('depositError', '❌ Money sent to wrong address!');
               return;
           }
 
@@ -115,7 +115,7 @@ io.on('connection', (socket) => {
           const finalAmount = parseFloat(creditsToAdd.toFixed(2));
 
           if (finalAmount <= 0) {
-             console.log("⚠️ REJECTED: Amount too small.");
+             socket.emit('depositError', '❌ Amount too small.');
              return;
           }
 
@@ -127,12 +127,14 @@ io.on('connection', (socket) => {
           
           await supabase.from('users').update({ balance: newBalance }).eq('email', email);
           
-          // 4. Notify
+          // 4. Success!
           socket.emit('balanceUpdate', newBalance);
+          socket.emit('depositSuccess', `✅ Added $${finalAmount}!`); // Notify success specifically
           console.log(`✅ VERIFIED: Added $${finalAmount} to ${email}`);
 
       } catch (err) {
-          console.error("❌ VERIFICATION FAILED:", err.message);
+          console.error("❌ ERROR:", err.message);
+          socket.emit('depositError', '❌ System Error. Check Hash.');
       }
   });
 

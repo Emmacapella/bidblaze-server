@@ -5,89 +5,110 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-const server = http.createServer(app);
 
+const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// --- CONSTANTS ---
-const GAME_DURATION_MS = 299 * 1000; // 5 Minutes
-const BID_FEE = 1.00;     // 1 USDC
-const JACKPOT_SHARE = 0.70; // 70% goes to winner
-const DEV_SHARE = 0.30;     // 30% goes to you
+// --- 🔐 SECURITY CONFIGURATION ---
+const ADMIN_PASSWORD = "bidblaze-boss"; // <--- CHANGE THIS TO SOMETHING STRONG!
+const BID_FEE = 1.00;
 
-// --- GAME STATE ---
+// GLOBAL SECURITY VARIABLES (Must be at the top)
+let globalFailures = 0;
+let adminLockedUntil = 0;
+
 let gameState = {
-  status: 'ACTIVE',
-  jackpot: 0.00, // Starts at $0 (Progressive)
-  devWallet: 0.00, // Tracks your earnings
-  endTime: Date.now() + GAME_DURATION_MS,
+  jackpot: 100.00,
   bidCost: BID_FEE,
-  bidCount: 0,
-  lastBidder: "No bids yet",
-  history: []
+  endTime: Date.now() + 60000,
+  lastBidder: null,
+  history: [],
+  connectedUsers: 0,
+  status: 'ACTIVE'
 };
 
-// --- INTERNAL LOOP ---
-setInterval(() => {
-  const timeLeft = Math.max(0, Math.ceil((gameState.endTime - Date.now()) / 1000));
-  
-  if (gameState.status === 'ACTIVE' && timeLeft <= 0) {
-    gameState.status = 'ENDED';
-    io.emit('gameState', gameState);
-    
-    // Wait 30s then reset
-    setTimeout(() => {
-      resetGame();
-    }, 30000);
-  }
-}, 1000);
-
-function resetGame() {
-  gameState.status = 'ACTIVE';
-  gameState.jackpot = 0; 
-  gameState.endTime = Date.now() + GAME_DURATION_MS;
-  gameState.bidCost = BID_FEE;
-  gameState.bidCount = 0;
-  gameState.lastBidder = "No bids yet"; // FIXED THIS LINE
-  gameState.history = [];
-  io.emit('gameState', gameState);
-}
-
 io.on('connection', (socket) => {
-  socket.emit('gameState', gameState);
+  gameState.connectedUsers++;
+  io.emit('gameState', gameState);
 
+  // 1. PLACE BID HANDLER
   socket.on('placeBid', (userEmail) => {
-    if (gameState.status !== 'ACTIVE') return;
+    if (gameState.status === 'ENDED') return;
 
-    // 1. UPDATE MONEY
-    gameState.bidCount++;
-    gameState.jackpot += (BID_FEE * JACKPOT_SHARE); // Add $0.70
-    gameState.devWallet += (BID_FEE * DEV_SHARE);   // Add $0.30 
-
-    // 2. LOG ENTRY
+    gameState.jackpot += BID_FEE;
+    
     const newBid = {
       id: Date.now(),
       amount: BID_FEE,
       time: new Date().toLocaleTimeString(),
       user: userEmail || "Anonymous"
     };
+
+    // Keep 30 items in history
     gameState.history.unshift(newBid);
     gameState.history = gameState.history.slice(0, 30);
     gameState.lastBidder = userEmail;
 
-    // 3. SMART TIMER LOGIC (5 Second Rule)
+    // Smart Timer Logic (5 Second Rule)
     const now = Date.now();
     const timeLeft = (gameState.endTime - now) / 1000;
-
     if (timeLeft < 5) {
-        // Only add 10 seconds if less than 5 seconds remain
         gameState.endTime = now + 10000; 
     }
 
     io.emit('gameState', gameState);
-    console.log(`Bid Placed! Jackpot: $${gameState.jackpot}`);
+  });
+
+  // 2. 🔐 ADMIN HANDLER (3 Tries = 10 Hour Lockdown)
+  socket.on('adminAction', (data) => {
+    const { password, action, value } = data;
+    const now = Date.now();
+
+    // A. CHECK IF LOCKED
+    if (now < adminLockedUntil) {
+        const hoursLeft = ((adminLockedUntil - now) / (1000 * 60 * 60)).toFixed(1);
+        console.log(`⛔ SECURITY LOCKDOWN ACTIVE. Try again in ${hoursLeft} hours.`);
+        return; // REJECT EVERYONE
+    }
+
+    // B. CHECK PASSWORD
+    if (password !== ADMIN_PASSWORD) {
+        globalFailures++;
+        console.log(`⚠️ Failed Login [Total: ${globalFailures}/3]`);
+
+        // TRIGGER LOCKDOWN AFTER 3 FAILS
+        if (globalFailures >= 3) {
+            adminLockedUntil = now + (10 * 60 * 60 * 1000); // 10 Hours
+            globalFailures = 0; 
+            console.log("🚨 MAXIMUM FAILURES REACHED. Admin Panel locked for 10 hours.");
+        }
+        return;
+    }
+
+    // C. SUCCESS (Reset counter)
+    globalFailures = 0;
+
+    if (action === 'RESET') {
+        gameState.jackpot = 100.00;
+        gameState.endTime = Date.now() + 60000;
+        gameState.history = [];
+        gameState.status = 'ACTIVE';
+        gameState.lastBidder = null;
+        io.emit('gameState', gameState);
+    }
+    
+    if (action === 'SET_JACKPOT') {
+        gameState.jackpot = parseFloat(value);
+        io.emit('gameState', gameState);
+    }
+
+    if (action === 'ADD_TIME') {
+        gameState.endTime = Date.now() + (parseInt(value) * 1000);
+        gameState.status = 'ACTIVE';
+        io.emit('gameState', gameState);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -96,7 +117,16 @@ io.on('connection', (socket) => {
   });
 });
 
+// Timer Loop
+setInterval(() => {
+    if (gameState.status === 'ACTIVE' && Date.now() > gameState.endTime) {
+        gameState.status = 'ENDED';
+        gameState.endTime = Date.now();
+        io.emit('gameState', gameState);
+    }
+}, 1000);
+
 server.listen(3001, () => {
-  console.log('NO-LOSS SERVER RUNNING ON 3001 🚀');
+  console.log('SECURE SERVER RUNNING ON 3001 🚀');
 });
 

@@ -77,16 +77,22 @@ io.on('connection', (socket) => {
     gameState.history = gameState.history.slice(0, 5);
     gameState.lastBidder = userEmail;
 
-    // 3. UPDATE TIME (Under 20s Rule)
+    // 3. SMART TIMER LOGIC (5 Second Rule)
     const now = Date.now();
-    const timeRemaining = gameState.endTime - now;
-    if (timeRemaining < 5000) {
-      gameState.endTime += 10000; 
+    const timeLeft = (gameState.endTime - now) / 1000;
+
+    if (timeLeft < 5) {
+        // Only add 10 seconds if less than 5 seconds remain
+        gameState.endTime = now + 10000; 
     }
 
     io.emit('gameState', gameState);
-    
-    console.log(`Bid Placed! Jackpot: $${gameState.jackpot.toFixed(2)}`);
+    console.log(`Bid Placed! Jackpot: $${gameState.jackpot}`);
+  });
+
+  socket.on('disconnect', () => {
+    gameState.connectedUsers--;
+    io.emit('gameState', gameState);
   });
 });
 

@@ -240,6 +240,11 @@ setInterval(async () => {
     }
 }, 1000);
 
+// --- 🔔 KEEP ALIVE ROUTE ---
+app.get('/', (req, res) => {
+  res.send('BidBlaze Server is Running! 🚀');
+});
+
 server.listen(3001, () => {
   console.log('SERVER RUNNING ON 3001 🚀');
 });

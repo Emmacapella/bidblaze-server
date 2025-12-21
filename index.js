@@ -14,15 +14,18 @@ const io = new Server(server, {
 // --- 🔐 SECURITY CONFIGURATION ---
 const ADMIN_PASSWORD = "bidblaze-boss"; 
 const BID_FEE = 1.00;
+const JACKPOT_SHARE = 0.70; // 70% to Winner
+const HOUSE_SHARE = 0.30;   // 30% to You
 
 // GLOBAL SECURITY VARIABLES
 let globalFailures = 0;
 let adminLockedUntil = 0;
 
 let gameState = {
-  jackpot: 0.00,        // <--- STARTS AT $0
+  jackpot: 0.00,        
+  houseBalance: 0.00,   // <--- TRACKS YOUR PROFIT
   bidCost: BID_FEE,
-  endTime: Date.now() + 299000, // <--- 299 SECONDS
+  endTime: Date.now() + 299000, 
   restartTimer: 0,
   lastBidder: null,
   history: [],
@@ -34,11 +37,13 @@ io.on('connection', (socket) => {
   gameState.connectedUsers++;
   io.emit('gameState', gameState);
 
-  // 1. PLACE BID HANDLER
+  // 1. PLACE BID HANDLER (With Profit Split)
   socket.on('placeBid', (userEmail) => {
     if (gameState.status === 'ENDED') return;
 
-    gameState.jackpot += BID_FEE;
+    // --- THE SPLIT LOGIC ---
+    gameState.jackpot += JACKPOT_SHARE;      // +$0.70
+    gameState.houseBalance += HOUSE_SHARE;    // +$0.30
     
     const newBid = {
       id: Date.now(),
@@ -80,8 +85,8 @@ io.on('connection', (socket) => {
     globalFailures = 0; 
 
     if (action === 'RESET') {
-        gameState.jackpot = 0.00;      // <--- RESET TO $0
-        gameState.endTime = Date.now() + 299000; // <--- RESET TO 299s
+        gameState.jackpot = 0.00;      
+        gameState.endTime = Date.now() + 299000; 
         gameState.history = [];
         gameState.status = 'ACTIVE';
         gameState.lastBidder = null;
@@ -99,6 +104,11 @@ io.on('connection', (socket) => {
         gameState.status = 'ACTIVE';
         io.emit('gameState', gameState);
     }
+    
+    // NEW: Check House Profits
+    if (action === 'CHECK_PROFIT') {
+        console.log(`💰 HOUSE PROFIT: $${gameState.houseBalance.toFixed(2)}`);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -107,11 +117,10 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- AUTO-RESTART LOOP (15 Seconds) ---
+// --- AUTO-RESTART LOOP ---
 setInterval(() => {
     const now = Date.now();
 
-    // 1. Check if Game Should End
     if (gameState.status === 'ACTIVE' && now > gameState.endTime) {
         gameState.status = 'ENDED';
         gameState.endTime = now;
@@ -119,10 +128,9 @@ setInterval(() => {
         io.emit('gameState', gameState);
     }
 
-    // 2. Check if Game Should Restart
     if (gameState.status === 'ENDED' && now > gameState.restartTimer) {
-        gameState.jackpot = 0.00;        // <--- RESTART AT $0
-        gameState.endTime = now + 299000; // <--- RESTART AT 299s
+        gameState.jackpot = 0.00;        
+        gameState.endTime = now + 299000; 
         gameState.history = [];
         gameState.status = 'ACTIVE';
         gameState.lastBidder = null;

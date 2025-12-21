@@ -12,7 +12,7 @@ const io = new Server(server, {
 });
 
 // --- 🔐 SECURITY CONFIGURATION ---
-const ADMIN_PASSWORD = "bidblaze-boss"; // <--- CHANGE THIS TO SOMETHING STRONG
+const ADMIN_PASSWORD = "bidblaze-boss"; 
 const BID_FEE = 1.00;
 
 // GLOBAL SECURITY VARIABLES
@@ -20,9 +20,9 @@ let globalFailures = 0;
 let adminLockedUntil = 0;
 
 let gameState = {
-  jackpot: 0, // Starts at $0
+  jackpot: 0.00,        // <--- STARTS AT $0
   bidCost: BID_FEE,
-  endTime: Date.now() + 60000, // 60 Seconds
+  endTime: Date.now() + 299000, // <--- 299 SECONDS
   restartTimer: 0,
   lastBidder: null,
   history: [],
@@ -47,7 +47,6 @@ io.on('connection', (socket) => {
       user: userEmail || "Anonymous"
     };
 
-    // Keep 30 items
     gameState.history.unshift(newBid);
     gameState.history = gameState.history.slice(0, 30);
     gameState.lastBidder = userEmail;
@@ -62,27 +61,27 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   });
 
-  // 2. 🔐 ADMIN HANDLER (With Auto-Ban)
+  // 2. 🔐 ADMIN HANDLER
   socket.on('adminAction', (data) => {
     const { password, action, value } = data;
     const now = Date.now();
 
-    if (now < adminLockedUntil) return; // Locked out
+    if (now < adminLockedUntil) return; 
 
     if (password !== ADMIN_PASSWORD) {
         globalFailures++;
         if (globalFailures >= 3) {
-            adminLockedUntil = now + (10 * 60 * 60 * 1000); // 10 Hours Lock
+            adminLockedUntil = now + (10 * 60 * 60 * 1000); 
             globalFailures = 0;
         }
         return;
     }
 
-    globalFailures = 0; // Success reset
+    globalFailures = 0; 
 
     if (action === 'RESET') {
-        gameState.jackpot = 100.00; // Reset to $100
-        gameState.endTime = Date.now() + 60000; // 60 Seconds
+        gameState.jackpot = 0.00;      // <--- RESET TO $0
+        gameState.endTime = Date.now() + 299000; // <--- RESET TO 299s
         gameState.history = [];
         gameState.status = 'ACTIVE';
         gameState.lastBidder = null;
@@ -115,15 +114,15 @@ setInterval(() => {
     // 1. Check if Game Should End
     if (gameState.status === 'ACTIVE' && now > gameState.endTime) {
         gameState.status = 'ENDED';
-        gameState.endTime = now; // Freeze time
-        gameState.restartTimer = now + 15000; // 15s Break
+        gameState.endTime = now;
+        gameState.restartTimer = now + 15000; 
         io.emit('gameState', gameState);
     }
 
     // 2. Check if Game Should Restart
     if (gameState.status === 'ENDED' && now > gameState.restartTimer) {
-        gameState.jackpot = 100.00; // Reset to $100
-        gameState.endTime = now + 60000; // 60 Seconds
+        gameState.jackpot = 0.00;        // <--- RESTART AT $0
+        gameState.endTime = now + 299000; // <--- RESTART AT 299s
         gameState.history = [];
         gameState.status = 'ACTIVE';
         gameState.lastBidder = null;

@@ -3,8 +3,8 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const { createPublicClient, http, formatEther } = require('viem');
-const { base } = require('viem/chains');
+// 👇 CHANGED: We now use Ethers instead of Viem
+const { ethers } = require('ethers');
 
 const app = express();
 app.use(cors());
@@ -18,7 +18,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // 2. CRYPTO SETTINGS
 // 👇 PASTE YOUR WALLET ADDRESS HERE (Must match Frontend)
 const TREASURY_ADDRESS = "0x496EBF196a00a331b72219B6bE1473CbD316383f".toLowerCase(); 
-const ETH_TO_USD_RATE = 1 / 0.0003; // $1 = 0.0003 ETH (Approx 3333 Credits per ETH)
+const ETH_TO_USD_RATE = 3333; // Approx rate (1 ETH = $3333). Adjust as needed.
 
 // 3. GAME SETTINGS
 const ADMIN_PASSWORD = "bidblaze-boss"; 
@@ -26,11 +26,8 @@ const BID_FEE = 1.00;
 const JACKPOT_SHARE = 0.70; 
 const HOUSE_SHARE = 0.30;   
 
-// --- BLOCKCHAIN CLIENT ---
-const publicClient = createPublicClient({ 
-  chain: base, 
-  transport: http() 
-});
+// --- BLOCKCHAIN CONNECTION (Base Network) ---
+const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -85,9 +82,9 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- 🔒 SECURE DEPOSIT HANDLER ---
+  // --- 🔒 SECURE DEPOSIT HANDLER (Using Ethers) ---
   socket.on('confirmDeposit', async (data) => {
-      const { email, txHash } = data; // We verify amount ourselves now!
+      const { email, txHash } = data;
       console.log(`🔍 Verifying TX: ${txHash}...`);
 
       try {
@@ -99,17 +96,22 @@ io.on('connection', (socket) => {
           }
 
           // 2. ASK BLOCKCHAIN (Verify Real Amount)
-          const tx = await publicClient.getTransaction({ hash: txHash });
+          const tx = await provider.getTransaction(txHash);
           
+          if (!tx) {
+             console.log("⚠️ REJECTED: Transaction not found yet.");
+             return;
+          }
+
           // Check Receiver
           if (tx.to.toLowerCase() !== TREASURY_ADDRESS) {
-              console.log("⚠️ REJECTED: Money sent to wrong address.");
+              console.log(`⚠️ REJECTED: Money sent to ${tx.to}, expected ${TREASURY_ADDRESS}`);
               return;
           }
 
           // Calculate Real Credits
-          const ethValue = parseFloat(formatEther(tx.value));
-          const creditsToAdd = ethValue * ETH_TO_USD_RATE; // Convert ETH to Credits
+          const ethValue = parseFloat(ethers.formatEther(tx.value));
+          const creditsToAdd = ethValue * ETH_TO_USD_RATE;
           const finalAmount = parseFloat(creditsToAdd.toFixed(2));
 
           if (finalAmount <= 0) {
@@ -170,6 +172,8 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   });
 
+  // ... (Admin & Loop code same as before, included below for completeness) ...
+  
   socket.on('adminAction', (data) => {
     const { password, action, value } = data;
     if (password !== ADMIN_PASSWORD) return;
@@ -206,7 +210,6 @@ io.on('connection', (socket) => {
 
 setInterval(async () => {
     const now = Date.now();
-
     if (gameState.status === 'ACTIVE' && now > gameState.endTime) {
         gameState.status = 'ENDED';
         gameState.endTime = now;
@@ -223,7 +226,6 @@ setInterval(async () => {
         }
         io.emit('gameState', gameState);
     }
-
     if (gameState.status === 'ENDED' && now > gameState.restartTimer) {
         gameState.jackpot = 0.00;        
         gameState.endTime = now + 299000; 
@@ -237,6 +239,6 @@ setInterval(async () => {
 }, 1000);
 
 server.listen(3001, () => {
-  console.log('SECURE SERVER RUNNING ON 3001 🚀');
+  console.log('SERVER RUNNING ON 3001 🚀');
 });
 

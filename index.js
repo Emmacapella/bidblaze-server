@@ -4,16 +4,6 @@ const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
-const TelegramBot = require('node-telegram-bot-api');
-
-// ✅ Secure way (Reads from Render settings)
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const MY_CHAT_ID = process.env.MY_CHAT_ID;
-
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
-
-const app = express();
-app.use(cors());
 
 // --- ⚠️ SETTINGS ---
 const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
@@ -166,9 +156,14 @@ io.on('connection', (socket) => {
           
           if (error) throw error;
 
-          // 🔔 SEND TELEGRAM ALERT
+          // ... inside your successful withdrawal logic ...
+
+          // 🔔 SEND TELEGRAM ALERT (New Method)
           const alertMsg = `💰 *NEW WITHDRAWAL REQUEST*\n\n👤 User: ${email}\n💵 Amount: $${amount}\n🏦 Address: \`${address}\`\n\n_Check Supabase to approve._`;
-          bot.sendMessage(MY_CHAT_ID, alertMsg, { parse_mode: 'Markdown' });
+          
+          sendTelegramAlert(alertMsg); // <--- USE THE NEW FUNCTION HERE
+
+          // ... continue with socket.emit success ...
 
           // Success Response
           socket.emit('balanceUpdate', user.balance - amount);
@@ -327,6 +322,24 @@ setInterval(() => {
     });
 
 }, 300000); // Runs every 5 minutes
+
+// --- 📨 TELEGRAM SENDER (No Library Needed) ---
+const sendTelegramAlert = (message) => {
+    const token = process.env.TELEGRAM_TOKEN || 'YOUR_TOKEN_HERE_IF_NOT_USING_ENV';
+    const chatId = process.env.MY_CHAT_ID || 'YOUR_CHAT_ID_HERE';
+    
+    // Encode the message to be URL-safe
+    const text = encodeURIComponent(message);
+    const url = `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chatId}&text=${text}&parse_mode=Markdown`;
+
+    const https = require('https');
+    
+    https.get(url, (res) => {
+        console.log(`[TELEGRAM] Alert sent! Status: ${res.statusCode}`);
+    }).on('error', (e) => {
+        console.error(`[TELEGRAM] Failed to send: ${e.message}`);
+    });
+};
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

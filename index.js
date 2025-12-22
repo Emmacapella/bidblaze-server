@@ -146,39 +146,54 @@ io.on('connection', (socket) => {
     } catch (e) { console.error(e); }
   });
 
-  // 4. 📤 Withdraw Logic (With History Saving)
+  // 4. 📤 Withdraw Logic (With Instant History Update)
   socket.on('requestWithdrawal', async (data) => {
       const { email, amount, address } = data;
       try {
-          if (amount < 10) return;
+          if (amount < 10) { socket.emit('withdrawError', 'Min withdrawal is $10'); return; }
+          
           const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
-          if (!user || user.balance < amount) return;
+          if (!user || user.balance < amount) { socket.emit('withdrawError', 'Insufficient funds'); return; }
           
           // A. Deduct Balance
           await supabase.from('users').update({ balance: user.balance - amount }).eq('email', email);
           
-          // B. ✅ SAVE TO HISTORY (DB)
+          // B. ✅ SAVE TO DATABASE
+          // Ensure your table is named 'withdrawals' and has 'user_email' column
           await supabase.from('withdrawals').insert([
-            { user_email: email, amount: amount, address: address, status: 'pending', created_at: new Date() }
+            { user_email: email, amount: amount, address: address, status: 'pending' }
           ]);
 
           console.log(`WITHDRAW: ${email} - $${amount}`);
           socket.emit('balanceUpdate', user.balance - amount);
-          socket.emit('withdrawSuccess', 'Processing...');
+          socket.emit('withdrawSuccess', 'Request Sent! processing...');
           
-          // C. Send updated history immediately back to user
-          const { data: history } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+          // C. 🔄 INSTANTLY SEND UPDATED HISTORY
+          const { data: history } = await supabase
+              .from('withdrawals')
+              .select('*')
+              .eq('user_email', email)
+              .order('created_at', { ascending: false });
+              
           socket.emit('withdrawalHistory', history);
 
-      } catch (e) { console.error(e); }
+      } catch (e) { 
+          console.error(e); 
+          socket.emit('withdrawError', 'Server Error processing withdrawal');
+      }
   });
 
-  // 5. 🆕 Get Withdrawal History
+  // 5. 🆕 Get Withdrawal History (Listener)
   socket.on('getWithdrawals', async (email) => {
-      const { data } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+      const { data } = await supabase
+          .from('withdrawals')
+          .select('*')
+          .eq('user_email', email)
+          .order('created_at', { ascending: false });
+      
       if (data) socket.emit('withdrawalHistory', data);
   });
-  
+
   // 6. Admin
   socket.on('adminAction', (data) => {
     if (data.password !== '1234') return; 

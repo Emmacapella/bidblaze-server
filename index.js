@@ -35,6 +35,7 @@ let gameState = {
   status: 'ACTIVE',
   lastBidder: null,
   history: [],
+  winners: [],
   connectedUsers: 0,
   restartTimer: 0
 };
@@ -215,115 +216,125 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => { gameState.connectedUsers--; io.emit('gameState', gameState); });
 });
 
-// --- 🔄 GAME LOOP & REFUND LOGIC ---
-setInterval(async () => {
-    const now = Date.now();
-
-    // 1. END GAME
-    if (gameState.status === 'ACTIVE' && now > gameState.endTime) {
-        gameState.status = 'ENDED';
-        gameState.endTime = now;
-        gameState.restartTimer = now + 15000; 
-
-        if (gameState.lastBidder) {
-            const winner = gameState.lastBidder;
-            
-            // 🛡️ CHECK: Is it a Refund? (Only 1 Player)
-            if (currentRoundBidders.size === 1) {
-                console.log(`🛡️ REFUND: Only 1 player (${winner}). Returning fees.`);
-                
-                // Refund Amount = Number of bids * Cost
-                const refundAmount = currentRoundBidCount * BID_FEE;
-                
-                // Remove the "Profit" we thought we made
-                gameState.houseBalance -= (currentRoundBidCount * HOUSE_SHARE);
-
-                // Give money back
-                const { data: user } = await supabase.from('users').select('balance').eq('email', winner).single();
-                if (user) {
-                   await supabase.from('users').update({ balance: user.balance + refundAmount }).eq('email', winner);
-                }
-            } 
-            // 🏆 NORMAL WIN (2+ Players)
-            else if (gameState.jackpot > 0) {
-                console.log(`🏆 WINNER: ${winner} won $${gameState.jackpot}`);
-                const { data: user } = await supabase.from('users').select('balance').eq('email', winner).single();
-                if (user) {
-                    await supabase.from('users').update({ balance: user.balance + gameState.jackpot }).eq('email', winner);
-                }
-            }
-        }
-        io.emit('gameState', gameState);
-    }
-
-    // 2. RESTART GAME
-    if (gameState.status === 'ENDED' && now > gameState.restartTimer) {
-        gameState.jackpot = 0.00;        
-        gameState.endTime = now + 299000; 
-        gameState.history = [];
-        gameState.status = 'ACTIVE';
-        gameState.lastBidder = null;
-        
-        // Reset Tracker
-        currentRoundBidders.clear();
-        currentRoundBidCount = 0;
-
-        gameState.restartTimer = 0;
-        saveGameToDB(); 
-        io.emit('gameState', gameState);
-    }
-}, 1000);
-// --- 🤖 BOT SYSTEM (Strategic Snipers) ---
+// --- 🤖 SMART BOT & GAME ENGINE (With Database Saving) ---
 const botNames = [
-  "CryptoKing", "Alice_W", "MoonWalker", "Whale0x", "SatoshiFan", 
-  "TraderJo", "EthMaxi", "BitLord", "DeFi_Degen", "GasMaster", 
-  "AlphaSeeker", "HODL_2025", "BaseGod", "NFT_Collector", "WAGMI_Boy"
+  "cryptoking", "alicewhe", "moonwalker", "whale0x", "satoshifan", 
+  "traderjo", "ethmaxi", "bitlord", "deFidegen", "gasmaster", 
+  "alphaseeker", "mayami2025", "basegod", "nftcollector", "WAGMIboy"
 ];
 
+// 1. Bot Function (Recursive with Random Delay)
 function triggerRandomBot() {
   // Random delay between 25 and 40 seconds
   const randomDelay = Math.floor(Math.random() * (40000 - 25000 + 1) + 25000);
 
-  setTimeout(() => {
-    if (gameState && gameState.status === 'ACTIVE') {
+  setTimeout(() => { 
+    if (gameState.status === 'ACTIVE') {
        const randomBot = botNames[Math.floor(Math.random() * botNames.length)];
-       
-       // 1. Calculate Time Left
        const timeLeft = gameState.endTime - Date.now();
 
-       // 2. LOGIC: If less than 5 seconds remain, Add 10 Seconds
+       // 🧠 SMART BOT: Only adds 10s if time is < 5s
        if (timeLeft < 5000 && timeLeft > 0) {
-           gameState.endTime += 10000; // Adds 10s to the current time
-           console.log(`⏱️ Critical Hit! Added 10s.`);
+           gameState.endTime += 10000;
+           console.log("🤖 Bot saved the game! +10s");
        }
-       // Else: The timer continues normally without changing
 
-       // 3. Add the Bid
-       const bidAmount = 1.00;
-       gameState.jackpot += bidAmount;
+       // Bot Bids
+       gameState.jackpot += 1.00;
+       const newBid = { id: Date.now(), user: randomBot + "@bot.com", amount: 1.00, time: new Date() };
        
-       const newBid = {
-         id: Date.now(),
-         user: randomBot + "@bot.com",
-         amount: bidAmount,
-         time: new Date()
-       };
-
        gameState.history.unshift(newBid);
        if (gameState.history.length > 50) gameState.history.pop();
        
-       console.log(`🤖 Bot ${randomBot} bid. (Current Timer: ${Math.ceil((gameState.endTime - Date.now())/1000)}s)`);
        io.emit('gameState', gameState);
     }
-    
-    // Schedule next bid
-    triggerRandomBot();
-    
+    triggerRandomBot(); // Schedule next bid
   }, randomDelay);
 }
-
-// Start the bots
+// Start Bots
 triggerRandomBot();
+
+// 2. Main Game Loop (Handles Time & Saving Winners)
+setInterval(async () => {
+  const now = Date.now();
+
+  if (gameState.status === 'ACTIVE') {
+    if (now >= gameState.endTime) {
+      // --- 🛑 GAME OVER ---
+      gameState.status = 'ENDED';
+      gameState.restartTimer = now + 15000; // 15s Break
+
+      // 🏆 WINNER LOGIC
+      if (gameState.history.length > 0) {
+         const lastBid = gameState.history[0];
+         
+         // A. Create Winner Entry
+         const winnerEntry = {
+             user: lastBid.user,
+             amount: gameState.jackpot,
+             time: now
+         };
+         
+         // B. Add to Local List (For Dashboard)
+         if (!gameState.winners) gameState.winners = [];
+         gameState.winners.unshift(winnerEntry);
+         if (gameState.winners.length > 5) gameState.winners.pop();
+
+         console.log(`🏆 WINNER: ${lastBid.user} won $${gameState.jackpot}`);
+
+         // C. SAVE TO DATABASE (Supabase) 💾
+         // Only save if it's a REAL user (not a bot)
+         if (!lastBid.user.includes("@bot.com")) {
+             try {
+                // 1. Get current user balance
+                const { data: userData } = await supabase
+                    .from('users')
+                    .select('balance')
+                    .eq('email', lastBid.user)
+                    .single();
+
+                if (userData) {
+                    const newBalance = userData.balance + gameState.jackpot;
+                    
+                    // 2. Update Balance in DB
+                    await supabase
+                        .from('users')
+                        .update({ balance: newBalance })
+                        .eq('email', lastBid.user);
+                        
+                    console.log(`✅ Database Updated: ${lastBid.user} now has $${newBalance}`);
+                }
+             } catch (err) {
+                 console.error("❌ Database Save Error:", err);
+             }
+         }
+         
+         // Save the Game State
+         saveGameToDB(); 
+      }
+      io.emit('gameState', gameState);
+    }
+  } 
+  else if (gameState.status === 'ENDED') {
+    if (now >= gameState.restartTimer) {
+      // --- 🔄 RESTART GAME ---
+      gameState.status = 'ACTIVE';
+      gameState.jackpot = 50.00; // Reset Jackpot
+      gameState.endTime = now + 60000; // 60s new round
+      gameState.history = [];
+      gameState.lastBidder = null;
+      
+      // Clear tracking if it exists
+      if (typeof currentRoundBidders !== 'undefined') {
+          currentRoundBidders.clear();
+          currentRoundBidCount = 0;
+      }
+      
+      saveGameToDB(); // Save reset state
+      io.emit('gameState', gameState);
+    }
+  }
+}, 1000);
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

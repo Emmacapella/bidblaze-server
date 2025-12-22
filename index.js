@@ -67,25 +67,6 @@ async function saveGameToDB() {
   }).eq('id', 1);
 }
 
-// --- 🤖 INTERNAL KEEPALIVE (Runs every 5 mins) ---
-const PING_URL = "https://bidblaze.onrender.com"; 
-
-// 300,000 milliseconds = 5 Minutes
-setInterval(async () => {
-    try {
-        console.log(`[CRON] ⏰ Waking up server...`);
-        const response = await fetch(PING_URL);
-        
-        if (response.ok) {
-            console.log(`[CRON] ✅ Server is awake! (Status: ${response.status})`);
-        } else {
-            console.log(`[CRON] ⚠️ Ping status: ${response.status}`);
-        }
-    } catch (e) {
-        console.error(`[CRON] ❌ Error waking up: ${e.message}`);
-    }
-}, 300000);
-
 // --- 🌐 SOCKET CONNECTION ---
 io.on('connection', (socket) => {
   gameState.connectedUsers++;

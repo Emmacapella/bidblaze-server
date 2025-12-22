@@ -145,6 +145,17 @@ io.on('connection', (socket) => {
           socket.emit('withdrawError', '❌ System Error. Try again.');
       }
   });
+  // --- 📜 FETCH WITHDRAWAL HISTORY ---
+  socket.on('getWithdrawals', async (email) => {
+      const { data } = await supabase
+          .from('withdrawals')
+          .select('*')
+          .eq('user_email', email)
+          .order('created_at', { ascending: false })
+          .limit(5); // Show last 5
+      
+      socket.emit('withdrawalHistory', data || []);
+  });
 
   socket.on('placeBid', async (userEmail) => {
     if (gameState.status === 'ENDED') return;

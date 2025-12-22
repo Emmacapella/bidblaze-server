@@ -196,7 +196,7 @@ io.on('connection', (socket) => {
 
   socket.on('adminAction', (data) => {
     const { password, action, value } = data;
-    if (password !== ADMIN_PASSWORD) return;
+    if (password !== bidblaze-boss) return;
 
     if (action === 'RESET') {
         gameState.jackpot = 0.00;      
@@ -273,6 +273,40 @@ setInterval(async () => {
         io.emit('gameState', gameState);
     }
 }, 1000);
+// --- 🤖 BOT SYSTEM (15 Active Bots) ---
+const botNames = [
+  "CryptoKing", "Alice_W", "MoonWalker", "Whale0x", "SatoshiFan", 
+  "TraderJo", "EthMaxi", "BitLord", "DeFi_Degen", "GasMaster", 
+  "AlphaSeeker", "HODL_2025", "BaseGod", "NFT_Collector", "WAGMI_Boy"
+];
+
+// Bots check to bid every 2 seconds (Very Lively)
+setInterval(() => {
+  if (!gameState || gameState.status !== 'ACTIVE') return; 
+
+  // 40% chance a bot plays every check
+  if (Math.random() > 0.6) {
+    const randomBot = botNames[Math.floor(Math.random() * botNames.length)];
+    
+    // Logic to add a fake bid
+    const bidAmount = 1.00;
+    gameState.jackpot += bidAmount; 
+    gameState.endTime = Date.now() + 15000; // Reset timer to 15s
+    
+    const newBid = {
+      id: Date.now(),
+      user: randomBot + "@bot.com",
+      amount: bidAmount,
+      time: new Date()
+    };
+
+    gameState.history.unshift(newBid);
+    if (gameState.history.length > 50) gameState.history.pop();
+    
+    // Broadcast the update
+    io.emit('gameState', gameState);
+  }
+}, 2000);
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

@@ -16,7 +16,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const TREASURY_ADDRESS = "0x496EBF196a00a331b72219B6bE1473CbD316383f".toLowerCase(); // ⚠️ PASTE YOUR ADDRESS HERE
 const ETH_TO_USD_RATE = 3333; 
 
-const ADMIN_PASSWORD = "Emmanuel 11/12/2006"; 
+const ADMIN_PASSWORD = "bidblaze-boss"; 
 const BID_FEE = 1.00;       
 const JACKPOT_SHARE = 0.95; 
 const HOUSE_SHARE = 0.05;   

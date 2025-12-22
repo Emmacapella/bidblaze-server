@@ -26,220 +26,171 @@ const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-// GLOBAL STATE
+// --- 🌍 GLOBAL STATE ---
 let gameState = {
-  jackpot: 0.00,        
+  jackpot: 50.00,        
   houseBalance: 0.00,
-  bidCost: BID_FEE,
-  endTime: Date.now() + 299000, 
+  bidCost: 1.00,
+  endTime: Date.now() + 60000,
   status: 'ACTIVE',
   lastBidder: null,
   history: [],
-  winners: [],
+  // 🏆 Fake winners so the list isn't empty at start
+  winners: [
+      { user: "Whale0x@bot.com", amount: 142.00, time: Date.now() - 100000 },
+      { user: "SatoshiFan@bot.com", amount: 89.00, time: Date.now() - 500000 },
+      { user: "CryptoKing@bot.com", amount: 210.50, time: Date.now() - 900000 }
+  ],
   connectedUsers: 0,
   restartTimer: 0
 };
 
-// 🛡️ NEW: Track Bidders for Refund Logic
-let currentRoundBidders = new Set();
-let currentRoundBidCount = 0;
-
-// --- SYNC ---
+// --- 💾 DATABASE FUNCTIONS ---
 async function loadGameFromDB() {
-    const { data } = await supabase.from('game_state').select('*').eq('id', 1).single();
-    if (data) {
-        gameState.jackpot = data.jackpot;
-        gameState.houseBalance = data.house_balance;
-    } else {
-        await supabase.from('game_state').insert([{ id: 1, jackpot: 0.00, house_balance: 0.00, end_time: 0 }]);
-    }
+  const { data } = await supabase.from('game_state').select('*').eq('id', 1).single();
+  if (data) {
+    gameState.jackpot = data.jackpot;
+    gameState.houseBalance = data.house_balance;
+  } else {
+    await supabase.from('game_state').insert([{ id: 1, jackpot: 50.00, house_balance: 0.00, end_time: 0 }]);
+  }
 }
 loadGameFromDB();
 
 async function saveGameToDB() {
-    await supabase.from('game_state').update({
-        jackpot: gameState.jackpot,
-        house_balance: gameState.houseBalance
-    }).eq('id', 1);
+  await supabase.from('game_state').update({
+    jackpot: gameState.jackpot,
+    house_balance: gameState.houseBalance
+  }).eq('id', 1);
 }
 
-app.get('/', (req, res) => { res.send('BidBlaze Server is Running! 🚀'); });
-
+// --- 🌐 SOCKET CONNECTION & PAYMENTS ---
 io.on('connection', (socket) => {
   gameState.connectedUsers++;
   io.emit('gameState', gameState);
 
+  // 1. 💰 Get Balance
   socket.on('getUserBalance', async (email) => {
-      if (!email) return;
-      const { data } = await supabase.from('users').select('balance').eq('email', email).single();
-      if (data) socket.emit('balanceUpdate', data.balance);
-      else {
-          await supabase.from('users').insert([{ email: email, balance: 0.00 }]);
-          socket.emit('balanceUpdate', 0.00);
-      }
+    if (!email) return;
+    const { data } = await supabase.from('users').select('balance').eq('email', email).single();
+    if (data) socket.emit('balanceUpdate', data.balance);
+    else {
+      // Create user if not exists
+      await supabase.from('users').insert([{ email: email, balance: 0.00 }]);
+      socket.emit('balanceUpdate', 0.00);
+    }
   });
 
-  socket.on('confirmDeposit', async (data) => {
-      const { email, txHash } = data;
-      try {
-          const { data: existing } = await supabase.from('deposits').select('*').eq('id', txHash).single();
-          if (existing) { socket.emit('depositError', '⚠️ Receipt already used!'); return; }
+  // 2. 💸 Place Bid
+  socket.on('placeBid', async (email) => {
+    if (gameState.status !== 'ACTIVE') return;
 
-          const tx = await provider.getTransaction(txHash);
-          if (!tx) { socket.emit('depositError', '❌ Transaction not found. Wait a moment?'); return; }
-          if (tx.to.toLowerCase() !== TREASURY_ADDRESS) { socket.emit('depositError', '❌ Money sent to wrong address!'); return; }
-
-          const finalAmount = parseFloat((parseFloat(ethers.formatEther(tx.value)) * ETH_TO_USD_RATE).toFixed(2));
-          if (finalAmount <= 0) { socket.emit('depositError', '❌ Amount too small.'); return; }
-
-          await supabase.from('deposits').insert([{ id: txHash, user_email: email, amount: finalAmount }]);
-          const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
-          const newBalance = (user ? user.balance : 0) + finalAmount;
-          await supabase.from('users').update({ balance: newBalance }).eq('email', email);
-          
-          socket.emit('balanceUpdate', newBalance);
-          socket.emit('depositSuccess', `✅ Added $${finalAmount}!`);
-      } catch (err) {
-          console.error(err);
-          socket.emit('depositError', '❌ System Error. Check Hash.');
-      }
-  });
-  // --- 💸 WITHDRAWAL REQUEST HANDLER ---
-  socket.on('requestWithdrawal', async (data) => {
-      const { email, amount, address } = data;
-      console.log(`📉 WITHDRAWAL REQUEST: ${email} wants $${amount}`);
-
-      try {
-          if (amount < 10) {
-              socket.emit('withdrawError', '❌ Minimum withdrawal is $10');
-              return;
-          }
-
-          // 1. Check Balance
-          const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
-          
-          if (!user || user.balance < amount) {
-              socket.emit('withdrawError', '❌ Insufficient Funds');
-              return;
-          }
-
-          // 2. Deduct Balance
-          const newBalance = user.balance - amount;
-          await supabase.from('users').update({ balance: newBalance }).eq('email', email);
-
-          // 3. Save Request to DB (You need to create this table!)
-          await supabase.from('withdrawals').insert([{
-              user_email: email,
-              amount: amount,
-              wallet_address: address,
-              status: 'PENDING',
-              created_at: new Date()
-          }]);
-
-          // 4. Notify Success
-          socket.emit('balanceUpdate', newBalance);
-          socket.emit('withdrawSuccess', '✅ Request Sent! Admin will process shortly.');
-          console.log(`✅ WITHDRAWAL LOGGED: $${amount} for ${email}`);
-
-      } catch (err) {
-          console.error("❌ WITHDRAWAL ERROR:", err.message);
-          socket.emit('withdrawError', '❌ System Error. Try again.');
-      }
-  });
-  // --- 📜 FETCH WITHDRAWAL HISTORY ---
-  socket.on('getWithdrawals', async (email) => {
-      const { data } = await supabase
-          .from('withdrawals')
-          .select('*')
-          .eq('user_email', email)
-          .order('created_at', { ascending: false })
-          .limit(5); // Show last 5
-      
-      socket.emit('withdrawalHistory', data || []);
-  });
-
-  socket.on('placeBid', async (userEmail) => {
-    if (gameState.status === 'ENDED') return;
-    if (!userEmail) return;
-
-    const { data: user } = await supabase.from('users').select('*').eq('email', userEmail).single();
-    if (!user || user.balance < BID_FEE) { socket.emit('bidError', 'Insufficient Balance!'); return; }
-
-    // Deduct Balance
-    const newBalance = user.balance - BID_FEE;
-    await supabase.from('users').update({ balance: newBalance }).eq('email', userEmail);
-    socket.emit('balanceUpdate', newBalance); 
-
-    // Update Game State
-    gameState.jackpot += JACKPOT_SHARE;      
-    gameState.houseBalance += HOUSE_SHARE;    
-    
-    // 🛡️ Track Stats for Refund Logic
-    currentRoundBidders.add(userEmail);
-    currentRoundBidCount++;
-
-    saveGameToDB(); 
-
-    // Update History
-    const newBid = { id: Date.now(), amount: BID_FEE, time: new Date().toLocaleTimeString(), user: userEmail };
-    gameState.history.unshift(newBid);
-    gameState.history = gameState.history.slice(0, 30);
-    gameState.lastBidder = userEmail;
-
-    // Timer Logic
-    const now = Date.now();
-    if ((gameState.endTime - now) / 1000 < 10) { // Bump to 10s if low
-        gameState.endTime = now + 10000; 
+    // Deduct Balance (Real Users)
+    if (!email.includes('@bot.com')) {
+        const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+        if (!user || user.balance < gameState.bidCost) {
+            socket.emit('bidError', 'Insufficient Funds');
+            return;
+        }
+        await supabase.from('users').update({ balance: user.balance - gameState.bidCost }).eq('email', email);
+        socket.emit('balanceUpdate', user.balance - gameState.bidCost);
     }
 
+    // Update Game
+    gameState.jackpot += gameState.bidCost;
+    
+    // 🧠 Time Logic: Only add 10s if under 5s
+    if (gameState.endTime - Date.now() < 5000) {
+        gameState.endTime += 10000; 
+    }
+
+    const newBid = { id: Date.now(), user: email, amount: gameState.bidCost, time: new Date() };
+    gameState.history.unshift(newBid);
+    if (gameState.history.length > 50) gameState.history.pop();
+    
+    gameState.lastBidder = email;
     io.emit('gameState', gameState);
   });
 
-  socket.on('adminAction', (data) => {
-    const { password, action, value } = data;
-    if (password !== bidblaze-boss) return;
+  // 3. 📥 Deposit Logic
+  socket.on('confirmDeposit', async (data) => {
+    const { email, txHash } = data;
+    try {
+        const { data: existing } = await supabase.from('deposits').select('*').eq('id', txHash).single();
+        if (existing) { socket.emit('depositError', 'Transaction already used!'); return; }
 
-    if (action === 'RESET') {
-        gameState.jackpot = 0.00;      
-        gameState.endTime = Date.now() + 299000; 
-        gameState.history = [];
-        gameState.status = 'ACTIVE';
-        gameState.lastBidder = null;
-        currentRoundBidders.clear();
-        currentRoundBidCount = 0;
-        saveGameToDB(); 
-        io.emit('gameState', gameState);
+        const tx = await provider.getTransaction(txHash);
+        if (!tx) { socket.emit('depositError', 'Transaction not found. Wait a moment?'); return; }
+        // Note: Ensure TREASURY_ADDRESS is defined in your top section
+        if (tx.to.toLowerCase() !== TREASURY_ADDRESS.toLowerCase()) { socket.emit('depositError', 'Money sent to wrong address!'); return; }
+
+        const finalAmount = parseFloat((parseFloat(ethers.formatEther(tx.value)) * 3333).toFixed(2)); 
+        
+        await supabase.from('deposits').insert([{ id: txHash, user_email: email, amount: finalAmount }]);
+        
+        const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+        const newBal = (user ? user.balance : 0) + finalAmount;
+        
+        await supabase.from('users').update({ balance: newBal }).eq('email', email);
+        
+        socket.emit('balanceUpdate', newBal);
+        socket.emit('depositSuccess', `Added $${finalAmount}!`);
+    } catch (e) {
+        console.error(e);
+        socket.emit('depositError', 'System Error checking Hash.');
     }
-    // ... Other admin actions remain the same
   });
 
-  socket.on('disconnect', () => { gameState.connectedUsers--; io.emit('gameState', gameState); });
+  // 4. 📤 Withdrawal Logic
+  socket.on('requestWithdrawal', async (data) => {
+      const { email, amount, address } = data;
+      try {
+          if (amount < 10) { socket.emit('withdrawError', 'Min withdrawal is $10'); return; }
+          
+          const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+          if (!user || user.balance < amount) { socket.emit('withdrawError', 'Insufficient funds'); return; }
+          
+          await supabase.from('users').update({ balance: user.balance - amount }).eq('email', email);
+          console.log(`WITHDRAWAL REQUEST: ${email} wants $${amount} to ${address}`);
+          
+          socket.emit('balanceUpdate', user.balance - amount);
+          socket.emit('withdrawSuccess', 'Withdrawal Processing!');
+      } catch (e) { console.error(e); }
+  });
+  
+  // 5. 🔐 Admin Action
+  socket.on('adminAction', (data) => {
+    if (data.password !== '1234') return; 
+    if (data.action === 'RESET') {
+        gameState.status = 'ACTIVE';
+        gameState.jackpot = 50.00;
+        gameState.endTime = Date.now() + 60000;
+        io.emit('gameState', gameState);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    gameState.connectedUsers--;
+    io.emit('gameState', gameState);
+  });
 });
 
-// --- 🤖 SMART BOT & GAME ENGINE (With Database Saving) ---
-const botNames = [
-  "cryptoking", "alicewhe", "moonwalker", "whale0x", "satoshifan", 
-  "traderjo", "ethmaxi", "bitlord", "deFidegen", "gasmaster", 
-  "alphaseeker", "mayami2025", "basegod", "nftcollector", "WAGMIboy"
-];
+// --- 🤖 SMART BOT SYSTEM ---
+const botNames = ["CryptoKing", "Alice_W", "MoonWalker", "Whale0x", "SatoshiFan", "TraderJo", "EthMaxi", "BitLord", "DeFi_Degen", "GasMaster", "AlphaSeeker", "HODL_2025", "BaseGod", "NFT_Collector", "WAGMI_Boy"];
 
-// 1. Bot Function (Recursive with Random Delay)
 function triggerRandomBot() {
-  // Random delay between 25 and 40 seconds
-  const randomDelay = Math.floor(Math.random() * (40000 - 25000 + 1) + 25000);
+  const randomDelay = Math.floor(Math.random() * (40000 - 25000 + 1) + 25000); // 25-40s
 
-  setTimeout(() => { 
+  setTimeout(() => {
     if (gameState.status === 'ACTIVE') {
        const randomBot = botNames[Math.floor(Math.random() * botNames.length)];
        const timeLeft = gameState.endTime - Date.now();
 
-       // 🧠 SMART BOT: Only adds 10s if time is < 5s
        if (timeLeft < 5000 && timeLeft > 0) {
            gameState.endTime += 10000;
-           console.log("🤖 Bot saved the game! +10s");
+           console.log("🤖 Bot extended time!");
        }
 
-       // Bot Bids
        gameState.jackpot += 1.00;
        const newBid = { id: Date.now(), user: randomBot + "@bot.com", amount: 1.00, time: new Date() };
        
@@ -248,93 +199,58 @@ function triggerRandomBot() {
        
        io.emit('gameState', gameState);
     }
-    triggerRandomBot(); // Schedule next bid
+    triggerRandomBot();
   }, randomDelay);
 }
-// Start Bots
 triggerRandomBot();
 
-// 2. Main Game Loop (Handles Time & Saving Winners)
+// --- ⚡ MAIN GAME LOOP (The Engine) ---
 setInterval(async () => {
   const now = Date.now();
 
   if (gameState.status === 'ACTIVE') {
+    // Check if Time is Up
     if (now >= gameState.endTime) {
-      // --- 🛑 GAME OVER ---
       gameState.status = 'ENDED';
-      gameState.restartTimer = now + 15000; // 15s Break
+      gameState.restartTimer = now + 15000; // 15 Second cooldown
 
-      // 🏆 WINNER LOGIC
+      // 🏆 SAVE WINNER
       if (gameState.history.length > 0) {
          const lastBid = gameState.history[0];
+         const winnerEntry = { user: lastBid.user, amount: gameState.jackpot, time: now };
          
-         // A. Create Winner Entry
-         const winnerEntry = {
-             user: lastBid.user,
-             amount: gameState.jackpot,
-             time: now
-         };
-         
-         // B. Add to Local List (For Dashboard)
-         if (!gameState.winners) gameState.winners = [];
+         // Add to list
          gameState.winners.unshift(winnerEntry);
          if (gameState.winners.length > 5) gameState.winners.pop();
 
          console.log(`🏆 WINNER: ${lastBid.user} won $${gameState.jackpot}`);
 
-         // C. SAVE TO DATABASE (Supabase) 💾
-         // Only save if it's a REAL user (not a bot)
+         // Pay Real User
          if (!lastBid.user.includes("@bot.com")) {
-             try {
-                // 1. Get current user balance
-                const { data: userData } = await supabase
-                    .from('users')
-                    .select('balance')
-                    .eq('email', lastBid.user)
-                    .single();
-
-                if (userData) {
-                    const newBalance = userData.balance + gameState.jackpot;
-                    
-                    // 2. Update Balance in DB
-                    await supabase
-                        .from('users')
-                        .update({ balance: newBalance })
-                        .eq('email', lastBid.user);
-                        
-                    console.log(`✅ Database Updated: ${lastBid.user} now has $${newBalance}`);
-                }
-             } catch (err) {
-                 console.error("❌ Database Save Error:", err);
+             const { data: userData } = await supabase.from('users').select('balance').eq('email', lastBid.user).single();
+             if (userData) {
+                 await supabase.from('users').update({ balance: userData.balance + gameState.jackpot }).eq('email', lastBid.user);
              }
          }
-         
-         // Save the Game State
-         saveGameToDB(); 
+         saveGameToDB();
       }
       io.emit('gameState', gameState);
     }
   } 
   else if (gameState.status === 'ENDED') {
+    // Check if Cooldown is Over
     if (now >= gameState.restartTimer) {
-      // --- 🔄 RESTART GAME ---
       gameState.status = 'ACTIVE';
-      gameState.jackpot = 50.00; // Reset Jackpot
-      gameState.endTime = now + 60000; // 60s new round
+      gameState.jackpot = 50.00;
+      gameState.endTime = now + 60000;
       gameState.history = [];
       gameState.lastBidder = null;
       
-      // Clear tracking if it exists
-      if (typeof currentRoundBidders !== 'undefined') {
-          currentRoundBidders.clear();
-          currentRoundBidCount = 0;
-      }
-      
-      saveGameToDB(); // Save reset state
+      saveGameToDB();
       io.emit('gameState', gameState);
     }
   }
 }, 1000);
 
-server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
+server.listen(3001, () => { console.log('SERVER RUNNING ON PORT 3001 🚀'); });
 

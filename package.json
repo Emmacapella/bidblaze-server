@@ -16,6 +16,7 @@
     "ethers": "^6.16.0",
     "express": "^5.2.1",
     "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.67.0",
     "nodemon": "^3.1.11",
     "socket.io": "^4.8.1"
   }

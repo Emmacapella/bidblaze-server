@@ -1,7 +1,7 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const cors = require('cors');
+const cron = require('node-cron');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
 
@@ -67,11 +67,25 @@ async function saveGameToDB() {
   }).eq('id', 1);
 }
 
-// --- 🤖 PING BOT (Keep-Alive) ---
-setInterval(() => {
-    const mem = process.memoryUsage().rss / 1024 / 1024;
-    console.log(`[PING] Server Alive. RAM: ${mem.toFixed(2)} MB`);
-}, 300000); 
+// --- 🤖 CRON JOB (Keep-Alive Bot) ---
+const PING_URL = "https://bidblaze.onrender.com"; 
+
+// Schedule: Run every 5 minutes
+cron.schedule('*/5 * * * *', async () => {
+    try {
+        console.log(`[CRON] ⏰ Waking up server...`);
+        // Self-ping to reset the 15-min idle timer
+        const response = await fetch(PING_URL);
+        
+        if (response.ok) {
+            console.log(`[CRON] ✅ Server is awake! (Status: ${response.status})`);
+        } else {
+            console.log(`[CRON] ⚠️ Ping received non-200 status: ${response.status}`);
+        }
+    } catch (e) {
+        console.error(`[CRON] ❌ Error waking up: ${e.message}`);
+    }
+});
 
 // --- 🌐 SOCKET CONNECTION ---
 io.on('connection', (socket) => {

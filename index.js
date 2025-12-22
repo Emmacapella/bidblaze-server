@@ -18,8 +18,8 @@ const ETH_TO_USD_RATE = 3333;
 
 const ADMIN_PASSWORD = "emma$tiara"; 
 const BID_FEE = 1.00;       
-const JACKPOT_SHARE = 0.70; 
-const HOUSE_SHARE = 0.30;   
+const JACKPOT_SHARE = 0.95; 
+const HOUSE_SHARE = 0.05;   
 
 const provider = new ethers.JsonRpcProvider('https://mainnet.base.org');
 

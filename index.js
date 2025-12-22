@@ -103,6 +103,48 @@ io.on('connection', (socket) => {
           socket.emit('depositError', '❌ System Error. Check Hash.');
       }
   });
+  // --- 💸 WITHDRAWAL REQUEST HANDLER ---
+  socket.on('requestWithdrawal', async (data) => {
+      const { email, amount, address } = data;
+      console.log(`📉 WITHDRAWAL REQUEST: ${email} wants $${amount}`);
+
+      try {
+          if (amount < 10) {
+              socket.emit('withdrawError', '❌ Minimum withdrawal is $10');
+              return;
+          }
+
+          // 1. Check Balance
+          const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+          
+          if (!user || user.balance < amount) {
+              socket.emit('withdrawError', '❌ Insufficient Funds');
+              return;
+          }
+
+          // 2. Deduct Balance
+          const newBalance = user.balance - amount;
+          await supabase.from('users').update({ balance: newBalance }).eq('email', email);
+
+          // 3. Save Request to DB (You need to create this table!)
+          await supabase.from('withdrawals').insert([{
+              user_email: email,
+              amount: amount,
+              wallet_address: address,
+              status: 'PENDING',
+              created_at: new Date()
+          }]);
+
+          // 4. Notify Success
+          socket.emit('balanceUpdate', newBalance);
+          socket.emit('withdrawSuccess', '✅ Request Sent! Admin will process shortly.');
+          console.log(`✅ WITHDRAWAL LOGGED: $${amount} for ${email}`);
+
+      } catch (err) {
+          console.error("❌ WITHDRAWAL ERROR:", err.message);
+          socket.emit('withdrawError', '❌ System Error. Try again.');
+      }
+  });
 
   socket.on('placeBid', async (userEmail) => {
     if (gameState.status === 'ENDED') return;

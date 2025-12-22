@@ -4,6 +4,7 @@ const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
+const cors = require('cors');
 
 // --- ⚠️ SETTINGS ---
 const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
@@ -323,23 +324,27 @@ setInterval(() => {
 
 }, 300000); // Runs every 5 minutes
 
-// --- 📨 TELEGRAM SENDER (No Library Needed) ---
-const sendTelegramAlert = (message) => {
-    const token = process.env.TELEGRAM_TOKEN || 'YOUR_TOKEN_HERE_IF_NOT_USING_ENV';
-    const chatId = process.env.MY_CHAT_ID || 'YOUR_CHAT_ID_HERE';
+// --- 📨 TELEGRAM FUNCTION (Paste at the bottom of index.js) ---
+function sendTelegramAlert(message) {
+    const token = process.env.TELEGRAM_TOKEN;
+    const chatId = process.env.MY_CHAT_ID;
     
-    // Encode the message to be URL-safe
+    // Safety check: Don't crash if keys are missing
+    if (!token || !chatId) {
+        console.log("⚠️ Telegram keys missing. Skipping alert.");
+        return;
+    }
+
     const text = encodeURIComponent(message);
     const url = `https://api.telegram.org/bot${token}/sendMessage?chat_id=${chatId}&text=${text}&parse_mode=Markdown`;
-
-    const https = require('https');
     
+    const https = require('https');
     https.get(url, (res) => {
-        console.log(`[TELEGRAM] Alert sent! Status: ${res.statusCode}`);
+        // Just silently succeed
     }).on('error', (e) => {
-        console.error(`[TELEGRAM] Failed to send: ${e.message}`);
+        console.error(`Telegram Error: ${e.message}`);
     });
-};
+}
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

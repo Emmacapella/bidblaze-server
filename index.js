@@ -6,9 +6,9 @@ const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
 const TelegramBot = require('node-telegram-bot-api');
 
-// ⚠️ REPLACE THESE WITH YOUR REAL DETAILS
-const TELEGRAM_TOKEN = '8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI';
-const MY_CHAT_ID = '6571047127';
+// ✅ Secure way (Reads from Render settings)
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const MY_CHAT_ID = process.env.MY_CHAT_ID;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 

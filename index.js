@@ -1,3 +1,4 @@
+const path = require('path');
 const express = require('express');
 const http = require('http');
 const https = require('https'); // Used for Telegram & Keep-Alive
@@ -132,6 +133,14 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('User disconnected');
   });
+});
+
+// --- 📂 SERVE FRONTEND (Show the website) ---
+// This tells the server to use the 'dist' folder built by Vite/React
+app.use(express.static(path.join(__dirname, 'dist')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 // --- 🚀 START SERVER ---

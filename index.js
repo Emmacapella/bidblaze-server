@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
@@ -326,6 +327,19 @@ async function testDatabase() {
   }
 }
 testDatabase(); // Run immediately on start
+// --- 🤖 KEEPALIVE BOT (Bulletproof Version) ---
+const PING_URL = "https://bidblaze.onrender.com"; 
+
+setInterval(() => {
+    console.log(`[BOT] ⏰ Pinging server to keep awake...`);
+    
+    https.get(PING_URL, (res) => {
+        console.log(`[BOT] ✅ Server responded with status: ${res.statusCode}`);
+    }).on('error', (e) => {
+        console.error(`[BOT] ❌ Ping failed: ${e.message}`);
+    });
+
+}, 300000); // Runs every 5 minutes
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

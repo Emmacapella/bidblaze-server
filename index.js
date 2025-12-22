@@ -273,40 +273,57 @@ setInterval(async () => {
         io.emit('gameState', gameState);
     }
 }, 1000);
-// --- 🤖 BOT SYSTEM (15 Active Bots) ---
+// --- 🤖 BOT SYSTEM (Strategic Snipers) ---
 const botNames = [
   "CryptoKing", "Alice_W", "MoonWalker", "Whale0x", "SatoshiFan", 
   "TraderJo", "EthMaxi", "BitLord", "DeFi_Degen", "GasMaster", 
   "AlphaSeeker", "HODL_2025", "BaseGod", "NFT_Collector", "WAGMI_Boy"
 ];
 
-// Bots check to bid every 2 seconds (Very Lively)
-setInterval(() => {
-  if (!gameState || gameState.status !== 'ACTIVE') return; 
+function triggerRandomBot() {
+  // Random delay between 25 and 40 seconds
+  const randomDelay = Math.floor(Math.random() * (40000 - 25000 + 1) + 25000);
 
-  // 40% chance a bot plays every check
-  if (Math.random() > 0.6) {
-    const randomBot = botNames[Math.floor(Math.random() * botNames.length)];
-    
-    // Logic to add a fake bid
-    const bidAmount = 1.00;
-    gameState.jackpot += bidAmount; 
-    gameState.endTime = Date.now() + 15000; // Reset timer to 15s
-    
-    const newBid = {
-      id: Date.now(),
-      user: randomBot + "@bot.com",
-      amount: bidAmount,
-      time: new Date()
-    };
+  setTimeout(() => {
+    if (gameState && gameState.status === 'ACTIVE') {
+       const randomBot = botNames[Math.floor(Math.random() * botNames.length)];
+       
+       // 1. Calculate Time Left
+       const timeLeft = gameState.endTime - Date.now();
 
-    gameState.history.unshift(newBid);
-    if (gameState.history.length > 50) gameState.history.pop();
+       // 2. LOGIC: If less than 5 seconds remain, Add 10 Seconds
+       if (timeLeft < 5000 && timeLeft > 0) {
+           gameState.endTime += 10000; // Adds 10s to the current time
+           console.log(`⏱️ Critical Hit! Added 10s.`);
+       }
+       // Else: The timer continues normally without changing
+
+       // 3. Add the Bid
+       const bidAmount = 1.00;
+       gameState.jackpot += bidAmount;
+       
+       const newBid = {
+         id: Date.now(),
+         user: randomBot + "@bot.com",
+         amount: bidAmount,
+         time: new Date()
+       };
+
+       gameState.history.unshift(newBid);
+       if (gameState.history.length > 50) gameState.history.pop();
+       
+       console.log(`🤖 Bot ${randomBot} bid. (Current Timer: ${Math.ceil((gameState.endTime - Date.now())/1000)}s)`);
+       io.emit('gameState', gameState);
+    }
     
-    // Broadcast the update
-    io.emit('gameState', gameState);
-  }
-}, 2000);
+    // Schedule next bid
+    triggerRandomBot();
+    
+  }, randomDelay);
+}
+
+// Start the bots
+triggerRandomBot();
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

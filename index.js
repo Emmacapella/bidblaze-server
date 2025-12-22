@@ -294,6 +294,26 @@ setInterval(async () => {
     }
   }
 }, 1000);
+// --- 🧪 DEBUG: TEST DATABASE CONNECTION ---
+async function testDatabase() {
+  console.log("🧪 TESTING DATABASE WRITE...");
+  const { data, error } = await supabase.from('withdrawals').insert([
+    { 
+      user_email: 'test@admin.com', // OR 'email' if your column is named 'email'
+      amount: 10.00, 
+      address: '0xTestAddress', 
+      status: 'DEBUG_TEST' 
+    }
+  ]);
+  
+  if (error) {
+    console.error("❌ DATABASE WRITE FAILED:", error.message);
+    console.error("👉 Check your Column Names and RLS Policies!");
+  } else {
+    console.log("✅ DATABASE WRITE SUCCESS! The problem is in the Socket Event.");
+  }
+}
+testDatabase(); // Run immediately on start
 
 server.listen(3001, () => { console.log('SERVER RUNNING 🚀'); });
 

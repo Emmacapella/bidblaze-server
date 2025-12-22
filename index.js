@@ -4,6 +4,13 @@ const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const { ethers } = require('ethers');
+const TelegramBot = require('node-telegram-bot-api');
+
+// ⚠️ REPLACE THESE WITH YOUR REAL DETAILS
+const TELEGRAM_TOKEN = '8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI';
+const MY_CHAT_ID = '6571047127';
+
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
 const app = express();
 app.use(cors());
@@ -140,7 +147,7 @@ io.on('connection', (socket) => {
     } catch (e) { console.error(e); }
   });
 
-  // 4. 📤 Withdraw Logic (With Instant History Update)
+  // 4. 📤 Withdraw Logic (With Telegram Alert)
   socket.on('requestWithdrawal', async (data) => {
       const { email, amount, address } = data;
       try {
@@ -149,26 +156,25 @@ io.on('connection', (socket) => {
           const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
           if (!user || user.balance < amount) { socket.emit('withdrawError', 'Insufficient funds'); return; }
           
-          // A. Deduct Balance
+          // Deduct
           await supabase.from('users').update({ balance: user.balance - amount }).eq('email', email);
           
-          // B. ✅ SAVE TO DATABASE
-          // Ensure your table is named 'withdrawals' and has 'user_email' column
-          await supabase.from('withdrawals').insert([
+          // Save
+          const { error } = await supabase.from('withdrawals').insert([
             { user_email: email, amount: amount, address: address, status: 'pending' }
           ]);
-
-          console.log(`WITHDRAW: ${email} - $${amount}`);
-          socket.emit('balanceUpdate', user.balance - amount);
-          socket.emit('withdrawSuccess', 'Request Sent! processing...');
           
-          // C. 🔄 INSTANTLY SEND UPDATED HISTORY
-          const { data: history } = await supabase
-              .from('withdrawals')
-              .select('*')
-              .eq('user_email', email)
-              .order('created_at', { ascending: false });
-              
+          if (error) throw error;
+
+          // 🔔 SEND TELEGRAM ALERT
+          const alertMsg = `💰 *NEW WITHDRAWAL REQUEST*\n\n👤 User: ${email}\n💵 Amount: $${amount}\n🏦 Address: \`${address}\`\n\n_Check Supabase to approve._`;
+          bot.sendMessage(MY_CHAT_ID, alertMsg, { parse_mode: 'Markdown' });
+
+          // Success Response
+          socket.emit('balanceUpdate', user.balance - amount);
+          socket.emit('withdrawSuccess', 'Request Sent!');
+          
+          const { data: history } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
           socket.emit('withdrawalHistory', history);
 
       } catch (e) { 

@@ -18,12 +18,12 @@ const io = new Server(server, {
 });
 
 // ✅ USE ENV VARIABLES ONLY (IMPORTANT FOR RENDER)
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_KEY;
+const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
+const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const MY_CHAT_ID = process.env.MY_CHAT_ID;
+const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
+const MY_CHAT_ID = "6571047127";
 
 // --- KEEP ALIVE ---
 const PING_URL = "https://bidblaze.onrender.com";

@@ -5,7 +5,7 @@ const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
-const axios = require('axios'); // Required for Blockchain checks
+const axios = require('axios'); 
 
 const app = express();
 app.use(cors());
@@ -19,17 +19,13 @@ const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
 const MY_CHAT_ID = "6571047127";
 const PING_URL = "https://bidblaze-server.onrender.com"; 
 
-// ⚠️ IMPORTANT: REPLACE THESE WITH YOUR REAL ADDRESSES & KEYS ⚠️
-const ADMIN_WALLETS = {
-    EVM: "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c", // Address for BNB, ETH, BASE
-    TRON: "TYourTronWalletHere"        // Address for TRON (USDT)
-};
+// ⚠️ YOUR ADMIN WALLET
+const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
 
 const API_KEYS = {
-    BSC: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV",    // Get free key from bscscan.com
-    ETH: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV",  // Get free key from etherscan.io
-    BASE: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV", //Get free key from basescan.org
-    TRON: "None"                // Tron usually works without key
+    BSC: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV",    
+    ETH: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV",  
+    BASE: "YQYHD2PR83K37I6D8Y87YU7QK9RVRJDUJV"
 };
 
 const server = http.createServer(app);
@@ -41,11 +37,10 @@ const io = new Server(server, {
 let gameState = {
   status: 'ACTIVE',
   endTime: Date.now() + 300000, 
-  jackpot: 0.00,
+  jackpot: 100.00, // Reset to standard start
   bidCost: 1.00,
   lastBidder: null,
   history: [],          
-  // Dummy winners so the panel isn't empty on restart
   recentWinners: [
       { user: 'AlexKing@gmail.com', amount: 155.00, time: Date.now() },
       { user: 'SarahJ@yahoo.com', amount: 98.50, time: Date.now() },
@@ -57,7 +52,7 @@ let gameState = {
   userInvestments: {}   
 };
 
-// --- 3. KEEP ALIVE (For Render) ---
+// --- 3. KEEP ALIVE ---
 setInterval(() => {
   https.get(PING_URL).on('error', () => {});
 }, 300000);
@@ -108,7 +103,7 @@ setInterval(async () => {
     if (now >= gameState.restartTimer) {
       gameState.status = 'ACTIVE';
       gameState.endTime = now + 300000;
-      gameState.jackpot = 0.00;
+      gameState.jackpot = 50.00;
       gameState.lastBidder = null;
       gameState.history = [];
       gameState.bidders = [];
@@ -165,22 +160,18 @@ io.on('connection', (socket) => {
 
   // C. LINK WALLET (Security Step 1)
   socket.on('linkWallet', async ({ email, walletAddress }) => {
-      // 1. Check if user already has a pending deposit
       const { data: user } = await supabase.from('users').select('wallet_address').eq('email', email).single();
       if (user.wallet_address && user.wallet_address.length > 5) {
           socket.emit('depositError', 'You already have an active deposit. Cancel it to start new.');
           return;
       }
-      // 2. Check if address is taken by someone else
       const { data: existing } = await supabase.from('users').select('email').eq('wallet_address', walletAddress).single();
       if (existing && existing.email !== email) {
           socket.emit('depositError', 'Wallet address linked to another user!');
           return;
       }
-      // 3. Save it
       await supabase.from('users').update({ wallet_address: walletAddress }).eq('email', email);
-      // Determine which admin wallet to show based on length (simplified) or generic
-      socket.emit('walletLinked', { success: true, adminWallet: ADMIN_WALLETS.EVM }); 
+      socket.emit('walletLinked', { success: true, adminWallet: ADMIN_WALLET }); 
   });
 
   // D. CANCEL DEPOSIT
@@ -189,7 +180,7 @@ io.on('connection', (socket) => {
       socket.emit('depositCancelled', 'Deposit session cancelled.');
   });
 
-  // E. VERIFY DEPOSIT (Multi-Chain)
+  // E. VERIFY DEPOSIT (BNB, ETH, BASE - NO TRON)
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       const { data: user } = await supabase.from('users').select('wallet_address, balance').eq('email', email).single();
       if (!user || !user.wallet_address) {
@@ -198,87 +189,86 @@ io.on('connection', (socket) => {
       }
 
       let apiUrl = "";
-      let isTron = false;
-
-      // Select API based on Network
       switch (network) {
           case 'BSC': apiUrl = `https://api.bscscan.com/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${API_KEYS.BSC}`; break;
           case 'ETH': apiUrl = `https://api.etherscan.io/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${API_KEYS.ETH}`; break;
           case 'BASE': apiUrl = `https://api.basescan.org/api?module=proxy&action=eth_getTransactionByHash&txhash=${txHash}&apikey=${API_KEYS.BASE}`; break;
-          case 'TRON': apiUrl = `https://apilist.tronscan.org/api/transaction-info?hash=${txHash}`; isTron = true; break;
           default: socket.emit('depositError', 'Invalid Network'); return;
       }
 
       try {
           const response = await axios.get(apiUrl);
-          let valid = false;
-          let amount = 0;
-          let sender = "";
-          let receiver = "";
+          const tx = response.data.result;
 
-          // --- TRON LOGIC ---
-          if (isTron) {
-              const data = response.data;
-              if (!data || !data.contractRet || data.contractRet !== "SUCCESS") {
-                  socket.emit('depositError', 'Transaction failed or not found.');
-                  return;
-              }
-              // Check for USDT Transfer (TRC20)
-              if (data.tokenTransferInfo) {
-                  sender = data.tokenTransferInfo.from_address;
-                  receiver = data.tokenTransferInfo.to_address;
-                  amount = parseFloat(data.tokenTransferInfo.amount_str) / 1e6; // USDT (6 decimals)
-              } else {
-                  // Direct TRX
-                  sender = data.ownerAddress;
-                  receiver = data.toAddress;
-                  amount = data.amount / 1e6; 
-              }
-              
-              if (sender === user.wallet_address && receiver === ADMIN_WALLETS.TRON) valid = true;
-          } 
-          // --- EVM LOGIC (BSC, ETH, BASE) ---
-          else {
-              const tx = response.data.result;
-              if (!tx) { socket.emit('depositError', 'Transaction not found.'); return; }
-              sender = tx.from.toLowerCase();
-              receiver = tx.to.toLowerCase();
-              amount = parseInt(tx.value, 16) / 1e18; // 18 decimals
+          if (!tx) { socket.emit('depositError', 'Transaction not found.'); return; }
+          
+          const sender = tx.from.toLowerCase();
+          const receiver = tx.to.toLowerCase();
+          const amount = parseInt(tx.value, 16) / 1e18; 
 
-              if (sender === user.wallet_address.toLowerCase() && receiver === ADMIN_WALLETS.EVM.toLowerCase()) valid = true;
-          }
+          if (sender !== user.wallet_address.toLowerCase()) { socket.emit('depositError', 'Sender address mismatch.'); return; }
+          if (receiver !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Money not sent to us.'); return; }
 
-          if (valid) {
-              // Check Duplicate
-              const { data: used } = await supabase.from('deposits').select('id').eq('tx_hash', txHash).single();
-              if (used) { socket.emit('depositError', 'Transaction already used.'); return; }
+          const { data: used } = await supabase.from('deposits').select('id').eq('tx_hash', txHash).single();
+          if (used) { socket.emit('depositError', 'Transaction already used.'); return; }
 
-              // Calculate Credits (Rate: 1 Coin = $X credits)
-              let rate = 1;
-              if (network === 'BSC') rate = 600; 
-              if (network === 'ETH' || network === 'BASE') rate = 3000;
-              if (network === 'TRON') rate = 1; // USDT $1 = 1 Credit
+          let rate = 1;
+          if (network === 'BSC') rate = 600; 
+          if (network === 'ETH' || network === 'BASE') rate = 3000;
 
-              const credits = amount * rate;
-              const newBal = user.balance + credits;
+          const credits = amount * rate;
+          const newBal = user.balance + credits;
 
-              // Update DB
-              await supabase.from('users').update({ balance: newBal, wallet_address: null }).eq('email', email);
-              await supabase.from('deposits').insert([{
-                  user_email: email, amount: amount, tx_hash: txHash, 
-                  sender_address: sender, status: 'COMPLETED', network: network
-              }]);
+          await supabase.from('users').update({ balance: newBal, wallet_address: null }).eq('email', email);
+          await supabase.from('deposits').insert([{
+              user_email: email, amount: amount, tx_hash: txHash, 
+              sender_address: sender, status: 'COMPLETED', network: network
+          }]);
 
-              socket.emit('depositSuccess', newBal);
-              socket.emit('balanceUpdate', newBal);
-          } else {
-              socket.emit('depositError', 'Verification Failed: Sender/Receiver mismatch.');
-          }
+          socket.emit('depositSuccess', newBal);
+          socket.emit('balanceUpdate', newBal);
 
       } catch (err) {
           console.error(err);
           socket.emit('depositError', 'Network Error. Try again.');
       }
+  });
+
+  // F. 💸 WITHDRAWAL LOGIC (New)
+  socket.on('requestWithdrawal', async ({ email, amount, address, network }) => {
+      const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+      
+      if (!user || user.balance < amount) {
+          socket.emit('withdrawalError', 'Insufficient Balance');
+          return;
+      }
+      if (amount < 10) { 
+          socket.emit('withdrawalError', 'Minimum withdrawal is $10');
+          return;
+      }
+
+      // Deduct Balance
+      const newBalance = user.balance - amount;
+      const { error } = await supabase.from('users').update({ balance: newBalance }).eq('email', email);
+      
+      if (error) {
+           socket.emit('withdrawalError', 'Database Error');
+           return;
+      }
+
+      // Save Request
+      await supabase.from('withdrawals').insert([{
+          user_email: email,
+          amount: amount,
+          wallet_address: address,
+          network: network,
+          status: 'PENDING'
+      }]);
+
+      sendTelegramAlert(`💸 WITHDRAWAL: ${email} wants $${amount} (${network}) to ${address}`);
+
+      socket.emit('withdrawalSuccess', newBalance);
+      socket.emit('balanceUpdate', newBalance);
   });
 
   socket.on('adminAction', ({ password, action, value }) => {
@@ -292,7 +282,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => { gameState.connectedUsers--; });
 });
 
-// --- 6. SERVE FRONTEND (REGEX FIX) ---
+// --- 6. ROUTES ---
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get(/.*/, (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));

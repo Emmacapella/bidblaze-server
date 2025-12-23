@@ -1,7 +1,6 @@
 const path = require('path');
 const express = require('express');
 const http = require('http');
-const https = require('https');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
@@ -9,24 +8,19 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
-// --- CONFIG ---
-const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
-const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
-const MY_CHAT_ID = "6571047127";
-const PING_URL = "https://bidblaze-server.onrender.com"; 
-
+// 1. SETUP SERVER
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
-// --- GAME VARIABLES ---
+// 2. DATABASE (Supabase)
+const supabase = createClient(
+  'https://zshodgjnjqirmcqbzujm.supabase.co',
+  'sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz'
+);
+
+// 3. GAME VARIABLES
 let gameState = {
   status: 'ACTIVE',
   endTime: Date.now() + 300000, 
@@ -41,19 +35,7 @@ let gameState = {
   userInvestments: {}   
 };
 
-// --- KEEP ALIVE ---
-setInterval(() => {
-  https.get(PING_URL).on('error', () => {});
-}, 300000);
-
-function sendTelegramAlert(message) {
-  if (!TELEGRAM_TOKEN || !MY_CHAT_ID) return;
-  const text = encodeURIComponent(message);
-  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage?chat_id=${MY_CHAT_ID}&text=${text}&parse_mode=Markdown`;
-  https.get(url).on('error', () => {});
-}
-
-// --- GAME LOOP ---
+// 4. GAME LOOP
 setInterval(async () => {
   const now = Date.now();
   
@@ -62,24 +44,26 @@ setInterval(async () => {
       gameState.status = 'ENDED';
       gameState.restartTimer = now + 15000; 
 
+      // REFUND LOGIC
       if (gameState.bidders.length === 1) {
           const lonePlayer = gameState.bidders[0];
           const refundAmount = gameState.userInvestments[lonePlayer] || 0;
+          console.log("REFUND:", lonePlayer);
           
-          console.log(`VOID: Refund ${lonePlayer}`);
           const { data: user } = await supabase.from('users').select('balance').eq('email', lonePlayer).single();
           if (user) {
               await supabase.from('users').update({ balance: user.balance + refundAmount }).eq('email', lonePlayer);
           }
-      } else if (gameState.bidders.length > 1 && gameState.lastBidder) {
+      } 
+      // WINNER LOGIC
+      else if (gameState.bidders.length > 1 && gameState.lastBidder) {
           const winnerEmail = gameState.lastBidder;
           const winAmount = gameState.jackpot;
+          console.log("WINNER:", winnerEmail);
           
-          console.log(`WIN: ${winnerEmail}`);
           const { data: winner } = await supabase.from('users').select('balance').eq('email', winnerEmail).single();
           if (winner) {
               await supabase.from('users').update({ balance: winner.balance + winAmount }).eq('email', winnerEmail);
-              sendTelegramAlert(`🏆 WINNER: ${winnerEmail} won $${winAmount.toFixed(2)}!`);
           }
           gameState.recentWinners.unshift({ user: winnerEmail, amount: winAmount, time: Date.now() });
           if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
@@ -99,9 +83,9 @@ setInterval(async () => {
   io.emit('gameState', gameState);
 }, 100);
 
-// --- SOCKET.IO ---
+// 5. CLIENT CONNECTION
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+  console.log('User connected');
   gameState.connectedUsers++;
 
   socket.on('getUserBalance', async (email) => {
@@ -158,14 +142,13 @@ io.on('connection', (socket) => {
   });
 });
 
-// --- ROUTES ---
+// 6. ROUTES & START
 app.use(express.static(path.join(__dirname, 'dist')));
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-// --- START ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

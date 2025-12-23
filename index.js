@@ -34,7 +34,13 @@ let gameState = {
   bidCost: 1.00,
   lastBidder: null,
   history: [],          
-  recentWinners: [],    
+  recentWinners:   // Replace the empty [] with this:
+  recentWinners: [
+      { user: 'AlexKing@gmail.com', amount: 155.00, time: Date.now() },
+      { user: 'SarahJ@yahoo.com', amount: 98.50, time: Date.now() },
+      { user: 'CryptoFan@gmail.com', amount: 210.00, time: Date.now() }
+  ],
+,    
   connectedUsers: 0,
   restartTimer: null,
   bidders: [],          

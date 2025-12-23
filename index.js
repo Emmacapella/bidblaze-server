@@ -9,6 +9,15 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
+// --- CONFIG ---
+const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
+const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; 
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
+const MY_CHAT_ID = "6571047127";
+const PING_URL = "https://bidblaze-server.onrender.com"; 
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -17,31 +26,22 @@ const io = new Server(server, {
   }
 });
 
-// ✅ SUPABASE & CONFIG
-const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
-const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-
-const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
-const MY_CHAT_ID = "6571047127";
-
-// --- 🎮 GAME VARIABLES ---
+// --- GAME VARIABLES ---
 let gameState = {
   status: 'ACTIVE',
-  endTime: Date.now() + 300000, // 5 minutes
-  jackpot: 0.00,
+  endTime: Date.now() + 300000, 
+  jackpot: 100.00,
   bidCost: 1.00,
   lastBidder: null,
-  history: [],          // List of bids
-  recentWinners: [],    // 🏆 NEW: List of past winners
+  history: [],          
+  recentWinners: [],    
   connectedUsers: 0,
   restartTimer: null,
-  bidders: [],          // Tracks unique bidders for refunds
-  userInvestments: {}   // Tracks spending for refunds
+  bidders: [],          
+  userInvestments: {}   
 };
 
-// --- KEEP ALIVE (For Render) ---
-const PING_URL = "https://bidblaze-server.onrender.com"; 
+// --- KEEP ALIVE ---
 setInterval(() => {
   https.get(PING_URL).on('error', () => {});
 }, 300000);
@@ -53,72 +53,49 @@ function sendTelegramAlert(message) {
   https.get(url).on('error', () => {});
 }
 
-// --- 🔄 GAME LOOP ---
+// --- GAME LOOP ---
 setInterval(async () => {
   const now = Date.now();
   
   if (gameState.status === 'ACTIVE') {
     if (now >= gameState.endTime) {
       gameState.status = 'ENDED';
-      gameState.restartTimer = now + 15000; // 15s Cooldown
+      gameState.restartTimer = now + 15000; 
 
-      // --- 🏁 END GAME LOGIC ---
-
-      // SCENARIO A: REFUND (Only 1 Player)
       if (gameState.bidders.length === 1) {
           const lonePlayer = gameState.bidders[0];
           const refundAmount = gameState.userInvestments[lonePlayer] || 0;
           
-          console.log(`VOID GAME: Refunding $${refundAmount} to ${lonePlayer}`);
-          
+          console.log(`VOID: Refund ${lonePlayer}`);
           const { data: user } = await supabase.from('users').select('balance').eq('email', lonePlayer).single();
           if (user) {
-              const newBal = user.balance + refundAmount;
-              await supabase.from('users').update({ balance: newBal }).eq('email', lonePlayer);
+              await supabase.from('users').update({ balance: user.balance + refundAmount }).eq('email', lonePlayer);
           }
-      } 
-      
-      // SCENARIO B: WINNER TAKES ALL
-      else if (gameState.bidders.length > 1 && gameState.lastBidder) {
+      } else if (gameState.bidders.length > 1 && gameState.lastBidder) {
           const winnerEmail = gameState.lastBidder;
           const winAmount = gameState.jackpot;
-
-          console.log(`WINNER: ${winnerEmail} won $${winAmount}`);
           
-          // 1. Pay the Winner
+          console.log(`WIN: ${winnerEmail}`);
           const { data: winner } = await supabase.from('users').select('balance').eq('email', winnerEmail).single();
           if (winner) {
-              const newBal = winner.balance + winAmount;
-              await supabase.from('users').update({ balance: newBal }).eq('email', winnerEmail);
-              
+              await supabase.from('users').update({ balance: winner.balance + winAmount }).eq('email', winnerEmail);
               sendTelegramAlert(`🏆 WINNER: ${winnerEmail} won $${winAmount.toFixed(2)}!`);
           }
-
-          // 2. Add to Recent Winners List (For Display)
-          gameState.recentWinners.unshift({
-              user: winnerEmail,
-              amount: winAmount,
-              time: Date.now()
-          });
-          // Keep only last 5 winners
+          gameState.recentWinners.unshift({ user: winnerEmail, amount: winAmount, time: Date.now() });
           if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
       }
     }
-  } 
-  
-  // RESET GAME
-  else if (gameState.status === 'ENDED') {
+  } else if (gameState.status === 'ENDED') {
     if (now >= gameState.restartTimer) {
       gameState.status = 'ACTIVE';
-      gameState.endTime = now + 300000; // Reset to 5 mins
-      gameState.jackpot = 0.00;        // Reset Jackpot
+      gameState.endTime = now + 300000;
+      gameState.jackpot = 50.00;
       gameState.lastBidder = null;
       gameState.history = [];
-      gameState.bidders = [];           // Clear trackers
-      gameState.userInvestments = {};   // Clear investments
+      gameState.bidders = [];
+      gameState.userInvestments = {};
     }
   }
-
   io.emit('gameState', gameState);
 }, 100);
 
@@ -127,11 +104,9 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   gameState.connectedUsers++;
 
-  // 1. GET BALANCE
   socket.on('getUserBalance', async (email) => {
     if (!email) return;
     socket.join(email);
-    
     let { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!user) {
        await supabase.from('users').insert([{ email: email, balance: 0.00 }]);
@@ -140,43 +115,33 @@ io.on('connection', (socket) => {
     socket.emit('balanceUpdate', user.balance);
   });
 
-  // 2. PLACE BID (Your Custom Logic)
   socket.on('placeBid', async (email) => {
     if (gameState.status !== 'ACTIVE') return;
-
-    // A. Check Balance
     const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!user || user.balance < gameState.bidCost) {
       socket.emit('bidError', 'Insufficient Funds');
       return;
     }
-
-    // B. Deduct Balance
     const newBalance = user.balance - gameState.bidCost;
     await supabase.from('users').update({ balance: newBalance }).eq('email', email);
     socket.emit('balanceUpdate', newBalance);
 
-    // C. Update Jackpot (95% to Pot, 5% Fee)
     gameState.jackpot += (gameState.bidCost * 0.95); 
     gameState.lastBidder = email;
     
-    // D. Track for Refund Rule
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
     if (!gameState.userInvestments[email]) gameState.userInvestments[email] = 0;
     gameState.userInvestments[email] += gameState.bidCost;
 
-    // E. Timer Logic
     const timeRemaining = gameState.endTime - Date.now();
     if (timeRemaining < 10000) gameState.endTime = Date.now() + 10000;
     
-    // F. History
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
 
     io.emit('gameState', gameState);
   });
 
-  // 3. ADMIN ACTIONS
   socket.on('adminAction', ({ password, action, value }) => {
      if (action === 'RESET') {
         gameState.status = 'ACTIVE';
@@ -185,24 +150,17 @@ io.on('connection', (socket) => {
         gameState.history = [];
         gameState.bidders = [];
         gameState.userInvestments = {};
-     } else if (action === 'SET_JACKPOT') {
-         gameState.jackpot = parseFloat(value);
-     }
-  });
-
-  // 4. WITHDRAWALS
-  socket.on('requestWithdrawal', async ({ email, amount, address }) => {
-    // ... (Add your withdrawal logic back here if you want it)
+     } else if (action === 'SET_JACKPOT') gameState.jackpot = parseFloat(value);
   });
 
   socket.on('disconnect', () => {
     gameState.connectedUsers--;
-    console.log('User disconnected');
   });
 });
 
-// --- SERVE FRONTEND ---
+// --- ROUTES ---
 app.use(express.static(path.join(__dirname, 'dist')));
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });

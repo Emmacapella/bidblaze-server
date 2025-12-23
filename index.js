@@ -14,6 +14,10 @@ const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
 const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
+const MY_CHAT_ID = "6571047127";
+const PING_URL = "https://bidblaze-server.onrender.com"; 
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -36,6 +40,18 @@ let gameState = {
   bidders: [],          
   userInvestments: {}   
 };
+
+// --- KEEP ALIVE ---
+setInterval(() => {
+  https.get(PING_URL).on('error', () => {});
+}, 300000);
+
+function sendTelegramAlert(message) {
+  if (!TELEGRAM_TOKEN || !MY_CHAT_ID) return;
+  const text = encodeURIComponent(message);
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage?chat_id=${MY_CHAT_ID}&text=${text}&parse_mode=Markdown`;
+  https.get(url).on('error', () => {});
+}
 
 // --- GAME LOOP ---
 setInterval(async () => {
@@ -63,6 +79,7 @@ setInterval(async () => {
           const { data: winner } = await supabase.from('users').select('balance').eq('email', winnerEmail).single();
           if (winner) {
               await supabase.from('users').update({ balance: winner.balance + winAmount }).eq('email', winnerEmail);
+              sendTelegramAlert(`🏆 WINNER: ${winnerEmail} won $${winAmount.toFixed(2)}!`);
           }
           gameState.recentWinners.unshift({ user: winnerEmail, amount: winAmount, time: Date.now() });
           if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
@@ -84,7 +101,7 @@ setInterval(async () => {
 
 // --- SOCKET.IO ---
 io.on('connection', (socket) => {
-  console.log('User connected');
+  console.log('User connected:', socket.id);
   gameState.connectedUsers++;
 
   socket.on('getUserBalance', async (email) => {
@@ -144,7 +161,6 @@ io.on('connection', (socket) => {
 // --- ROUTES ---
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// ✅ THE FIX: We use /.*/ instead of '*' to avoid the PathError
 app.get(/.*/, (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });

@@ -37,7 +37,7 @@ const io = new Server(server, {
 let gameState = {
   status: 'ACTIVE',
   endTime: Date.now() + 300000, 
-  jackpot: 100.00, // Reset to standard start
+  jackpot: 0.00, // Reset to standard start
   bidCost: 1.00,
   lastBidder: null,
   history: [],          
@@ -103,7 +103,7 @@ setInterval(async () => {
     if (now >= gameState.restartTimer) {
       gameState.status = 'ACTIVE';
       gameState.endTime = now + 300000;
-      gameState.jackpot = 50.00;
+      gameState.jackpot = 0.00;
       gameState.lastBidder = null;
       gameState.history = [];
       gameState.bidders = [];

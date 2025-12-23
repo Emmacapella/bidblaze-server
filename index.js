@@ -19,7 +19,7 @@ const TELEGRAM_TOKEN = "8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI";
 const MY_CHAT_ID = "6571047127";
 const PING_URL = "https://bidblaze-server.onrender.com"; 
 
-// ⚠️ YOUR ADMIN WALLET
+// ⚠️ YOUR DEPOSIT ADDRESS
 const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
 
 const API_KEYS = {
@@ -37,7 +37,7 @@ const io = new Server(server, {
 let gameState = {
   status: 'ACTIVE',
   endTime: Date.now() + 300000, 
-  jackpot: 0.00, // Reset to standard start
+  jackpot: 100.00, 
   bidCost: 1.00,
   lastBidder: null,
   history: [],          
@@ -73,23 +73,17 @@ setInterval(async () => {
       gameState.status = 'ENDED';
       gameState.restartTimer = now + 15000; 
 
-      // SCENARIO A: REFUND (Only 1 Player)
       if (gameState.bidders.length === 1) {
           const lonePlayer = gameState.bidders[0];
           const refundAmount = gameState.userInvestments[lonePlayer] || 0;
-          
-          console.log(`VOID: Refund ${lonePlayer}`);
           const { data: user } = await supabase.from('users').select('balance').eq('email', lonePlayer).single();
           if (user) {
               await supabase.from('users').update({ balance: user.balance + refundAmount }).eq('email', lonePlayer);
           }
       } 
-      // SCENARIO B: WINNER (2+ Players)
       else if (gameState.bidders.length > 1 && gameState.lastBidder) {
           const winnerEmail = gameState.lastBidder;
           const winAmount = gameState.jackpot;
-          
-          console.log(`WIN: ${winnerEmail}`);
           const { data: winner } = await supabase.from('users').select('balance').eq('email', winnerEmail).single();
           if (winner) {
               await supabase.from('users').update({ balance: winner.balance + winAmount }).eq('email', winnerEmail);
@@ -103,7 +97,7 @@ setInterval(async () => {
     if (now >= gameState.restartTimer) {
       gameState.status = 'ACTIVE';
       gameState.endTime = now + 300000;
-      gameState.jackpot = 0.00;
+      gameState.jackpot = 50.00;
       gameState.lastBidder = null;
       gameState.history = [];
       gameState.bidders = [];
@@ -118,71 +112,87 @@ io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
   gameState.connectedUsers++;
 
-  // A. GET BALANCE
+  // A. GET BALANCE + HISTORY (Fixed Case Sensitivity)
   socket.on('getUserBalance', async (email) => {
     if (!email) return;
-    socket.join(email);
-    let { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+    const cleanEmail = email.toLowerCase(); // Force Lowercase
+    socket.join(email); // Keep room original for frontend compat
+    
+    let { data: user } = await supabase.from('users').select('balance').eq('email', cleanEmail).single();
     if (!user) {
-       await supabase.from('users').insert([{ email: email, balance: 0.00 }]);
+       await supabase.from('users').insert([{ email: cleanEmail, balance: 0.00 }]);
        user = { balance: 0.00 };
     }
     socket.emit('balanceUpdate', user.balance);
+
+    // Fetch History
+    const { data: withdrawals, error } = await supabase
+        .from('withdrawals')
+        .select('*')
+        .eq('user_email', cleanEmail)
+        .order('created_at', { ascending: false });
+    
+    if (error) console.error("History Error:", error.message);
+    else console.log(`Sent ${withdrawals.length} history items to ${cleanEmail}`);
+    
+    socket.emit('withdrawalHistory', withdrawals || []);
   });
 
   // B. PLACE BID
   socket.on('placeBid', async (email) => {
     if (gameState.status !== 'ACTIVE') return;
-    const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+    const cleanEmail = email.toLowerCase();
+    
+    const { data: user } = await supabase.from('users').select('balance').eq('email', cleanEmail).single();
     if (!user || user.balance < gameState.bidCost) {
       socket.emit('bidError', 'Insufficient Funds');
       return;
     }
     const newBalance = user.balance - gameState.bidCost;
-    await supabase.from('users').update({ balance: newBalance }).eq('email', email);
+    await supabase.from('users').update({ balance: newBalance }).eq('email', cleanEmail);
     socket.emit('balanceUpdate', newBalance);
 
     gameState.jackpot += (gameState.bidCost * 0.95); 
-    gameState.lastBidder = email;
+    gameState.lastBidder = cleanEmail;
     
-    if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-    if (!gameState.userInvestments[email]) gameState.userInvestments[email] = 0;
-    gameState.userInvestments[email] += gameState.bidCost;
+    if (!gameState.bidders.includes(cleanEmail)) gameState.bidders.push(cleanEmail);
+    if (!gameState.userInvestments[cleanEmail]) gameState.userInvestments[cleanEmail] = 0;
+    gameState.userInvestments[cleanEmail] += gameState.bidCost;
 
     const timeRemaining = gameState.endTime - Date.now();
     if (timeRemaining < 10000) gameState.endTime = Date.now() + 10000;
     
-    gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
+    gameState.history.unshift({ id: Date.now(), user: cleanEmail, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
 
     io.emit('gameState', gameState);
   });
 
-  // C. LINK WALLET (Security Step 1)
+  // C. LINK WALLET
   socket.on('linkWallet', async ({ email, walletAddress }) => {
-      const { data: user } = await supabase.from('users').select('wallet_address').eq('email', email).single();
+      const cleanEmail = email.toLowerCase();
+      const { data: user } = await supabase.from('users').select('wallet_address').eq('email', cleanEmail).single();
       if (user.wallet_address && user.wallet_address.length > 5) {
           socket.emit('depositError', 'You already have an active deposit. Cancel it to start new.');
           return;
       }
       const { data: existing } = await supabase.from('users').select('email').eq('wallet_address', walletAddress).single();
-      if (existing && existing.email !== email) {
+      if (existing && existing.email !== cleanEmail) {
           socket.emit('depositError', 'Wallet address linked to another user!');
           return;
       }
-      await supabase.from('users').update({ wallet_address: walletAddress }).eq('email', email);
+      await supabase.from('users').update({ wallet_address: walletAddress }).eq('email', cleanEmail);
       socket.emit('walletLinked', { success: true, adminWallet: ADMIN_WALLET }); 
   });
 
-  // D. CANCEL DEPOSIT
   socket.on('cancelDeposit', async (email) => {
-      await supabase.from('users').update({ wallet_address: null }).eq('email', email);
+      await supabase.from('users').update({ wallet_address: null }).eq('email', email.toLowerCase());
       socket.emit('depositCancelled', 'Deposit session cancelled.');
   });
 
-  // E. VERIFY DEPOSIT (BNB, ETH, BASE - NO TRON)
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
-      const { data: user } = await supabase.from('users').select('wallet_address, balance').eq('email', email).single();
+      const cleanEmail = email.toLowerCase();
+      const { data: user } = await supabase.from('users').select('wallet_address, balance').eq('email', cleanEmail).single();
       if (!user || !user.wallet_address) {
           socket.emit('depositError', 'No active deposit found.');
           return;
@@ -219,9 +229,9 @@ io.on('connection', (socket) => {
           const credits = amount * rate;
           const newBal = user.balance + credits;
 
-          await supabase.from('users').update({ balance: newBal, wallet_address: null }).eq('email', email);
+          await supabase.from('users').update({ balance: newBal, wallet_address: null }).eq('email', cleanEmail);
           await supabase.from('deposits').insert([{
-              user_email: email, amount: amount, tx_hash: txHash, 
+              user_email: cleanEmail, amount: amount, tx_hash: txHash, 
               sender_address: sender, status: 'COMPLETED', network: network
           }]);
 
@@ -234,9 +244,10 @@ io.on('connection', (socket) => {
       }
   });
 
-  // F. 💸 WITHDRAWAL LOGIC (New)
+  // F. WITHDRAWAL LOGIC (Fixed Case)
   socket.on('requestWithdrawal', async ({ email, amount, address, network }) => {
-      const { data: user } = await supabase.from('users').select('balance').eq('email', email).single();
+      const cleanEmail = email.toLowerCase();
+      const { data: user } = await supabase.from('users').select('balance').eq('email', cleanEmail).single();
       
       if (!user || user.balance < amount) {
           socket.emit('withdrawalError', 'Insufficient Balance');
@@ -247,28 +258,23 @@ io.on('connection', (socket) => {
           return;
       }
 
-      // Deduct Balance
       const newBalance = user.balance - amount;
-      const { error } = await supabase.from('users').update({ balance: newBalance }).eq('email', email);
+      const { error } = await supabase.from('users').update({ balance: newBalance }).eq('email', cleanEmail);
       
-      if (error) {
-           socket.emit('withdrawalError', 'Database Error');
-           return;
-      }
+      if (error) { socket.emit('withdrawalError', 'Database Error'); return; }
 
-      // Save Request
       await supabase.from('withdrawals').insert([{
-          user_email: email,
-          amount: amount,
-          wallet_address: address,
-          network: network,
-          status: 'PENDING'
+          user_email: cleanEmail, amount: amount, wallet_address: address, network: network, status: 'PENDING'
       }]);
 
-      sendTelegramAlert(`💸 WITHDRAWAL: ${email} wants $${amount} (${network}) to ${address}`);
+      sendTelegramAlert(`💸 WITHDRAWAL: ${cleanEmail} wants $${amount} (${network}) to ${address}`);
 
       socket.emit('withdrawalSuccess', newBalance);
       socket.emit('balanceUpdate', newBalance);
+      
+      // Refresh History Immediately
+      const { data: withdrawals } = await supabase.from('withdrawals').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
+      socket.emit('withdrawalHistory', withdrawals || []);
   });
 
   socket.on('adminAction', ({ password, action, value }) => {

@@ -4,7 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
-const { ethers } = require('ethers'); // ⚠️ NEW RELIABLE METHOD
+const { ethers } = require('ethers');
 
 const app = express();
 app.use(cors());
@@ -15,11 +15,18 @@ const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
 
-// ⚠️ NEW: USE PUBLIC RPCs (NO API KEYS NEEDED)
+// ⚠️ ROBUST PROVIDER SETUP (Handles Ethers v5 AND v6)
+const getProvider = (url) => {
+    if (ethers.providers && ethers.providers.JsonRpcProvider) {
+        return new ethers.providers.JsonRpcProvider(url); // v5
+    }
+    return new ethers.JsonRpcProvider(url); // v6
+};
+
 const providers = {
-    BSC: new ethers.providers.JsonRpcProvider('https://bsc-dataseed.binance.org/'),
-    ETH: new ethers.providers.JsonRpcProvider('https://cloudflare-eth.com'),
-    BASE: new ethers.providers.JsonRpcProvider('https://mainnet.base.org')
+    BSC: getProvider('https://bsc-dataseed.binance.org/'),
+    ETH: getProvider('https://cloudflare-eth.com'),
+    BASE: getProvider('https://mainnet.base.org')
 };
 
 const server = http.createServer(app);
@@ -73,39 +80,35 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   });
 
-  // ⚠️ ROBUST RPC VERIFICATION LOGIC
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          // WAIT FOR TX TO BE MINED (1 Confirm)
-          const tx = await provider.waitForTransaction(txHash, 1, 10000); // 10s timeout
+          const tx = await provider.waitForTransaction(txHash, 1, 10000); // 10s wait
+          if (!tx) { socket.emit('depositError', 'Tx not found yet. Wait.'); return; }
           
-          if (!tx) { socket.emit('depositError', 'Transaction pending or not found. Wait a bit.'); return; }
-          
-          // RE-FETCH TO CHECK RECEIVER
           const txDetails = await provider.getTransaction(txHash);
-          if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Wrong Receiver Address'); return; }
+          if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Wrong Receiver'); return; }
 
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
           
-          // CONVERT WEI TO ETH
-          const amt = parseFloat(ethers.utils.formatEther(txDetails.value));
-          let rate = network === 'BSC' ? 600 : 3000; // Rough rates
+          // HANDLE ETHERS v5 vs v6 FORMATTING
+          const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
+          const amt = parseFloat(formatEther(txDetails.value));
+          
+          let rate = network === 'BSC' ? 600 : 3000; 
           const newBal = u.balance + (amt * rate);
 
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
           
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
-          console.log("Deposit Success!");
 
       } catch (e) {
-          console.error("Deposit Error:", e.message);
-          // ⚠️ TELL CLIENT TO STOP ROLLING
-          socket.emit('depositError', 'Verification failed. Check Explorer.'); 
+          console.error("Deposit Crash:", e);
+          socket.emit('depositError', 'Verification Error. Check Explorer.');
       }
   });
 

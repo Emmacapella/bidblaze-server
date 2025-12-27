@@ -15,12 +15,12 @@ const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
 
-// ⚠️ ROBUST PROVIDER SETUP (Handles Ethers v5 AND v6)
+// PROVIDER SETUP
 const getProvider = (url) => {
     if (ethers.providers && ethers.providers.JsonRpcProvider) {
-        return new ethers.providers.JsonRpcProvider(url); // v5
+        return new ethers.providers.JsonRpcProvider(url); 
     }
-    return new ethers.JsonRpcProvider(url); // v6
+    return new ethers.JsonRpcProvider(url); 
 };
 
 const providers = {
@@ -56,14 +56,20 @@ setInterval(async () => {
   }
   io.emit('gameState', gameState);
 }, 1000);
+
 io.on('connection', (socket) => {
   gameState.connectedUsers++;
+  
   socket.on('getUserBalance', async (email) => {
     if (!email) return;
     socket.join(email);
     let { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!u) { await supabase.from('users').insert([{ email, balance: 0.00 }]); u = { balance: 0.00 }; }
     socket.emit('balanceUpdate', u.balance);
+    
+    // Get Withdrawals History
+    const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+    socket.emit('withdrawalHistory', w || []);
   });
 
   socket.on('placeBid', async (email) => {
@@ -80,29 +86,64 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   });
 
+  // ⚠️ FIXED WITHDRAWAL LOGIC (Prevents Crash)
+  socket.on('requestWithdrawal', async ({ email, amount, address, network }) => {
+      try {
+          const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
+          
+          if (!u || u.balance < amount) { 
+              socket.emit('withdrawalError', 'Insufficient Balance'); 
+              return; 
+          }
+
+          // Deduct Balance
+          const { error: updateError } = await supabase.from('users').update({ balance: u.balance - amount }).eq('email', email);
+          if (updateError) throw updateError;
+
+          // Save Withdrawal
+          const { error: insertError } = await supabase.from('withdrawals').insert([
+              { user_email: email, amount, wallet_address: address, network, status: 'PENDING' }
+          ]);
+          
+          if (insertError) {
+              // Rollback if save fails (Refund user)
+              await supabase.from('users').update({ balance: u.balance }).eq('email', email);
+              throw insertError; 
+          }
+
+          socket.emit('withdrawalSuccess', u.balance - amount);
+          socket.emit('balanceUpdate', u.balance - amount);
+          
+          // Refresh History
+          const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+          socket.emit('withdrawalHistory', w || []);
+
+      } catch (e) {
+          console.error("Withdraw Error:", e.message);
+          // If table doesn't exist, tell user instead of crashing
+          socket.emit('withdrawalError', 'System Error: Database table missing.');
+      }
+  });
+
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          const tx = await provider.waitForTransaction(txHash, 1, 10000); // 10s wait
+          const tx = await provider.waitForTransaction(txHash, 1, 10000); 
           if (!tx) { socket.emit('depositError', 'Tx not found yet. Wait.'); return; }
           
           const txDetails = await provider.getTransaction(txHash);
           if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Wrong Receiver'); return; }
 
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
-          
-          // HANDLE ETHERS v5 vs v6 FORMATTING
           const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
           const amt = parseFloat(formatEther(txDetails.value));
-          
           let rate = network === 'BSC' ? 600 : 3000; 
           const newBal = u.balance + (amt * rate);
 
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
-          
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
 
@@ -122,3 +163,4 @@ app.use(express.static(path.join(__dirname, 'dist')));
 app.get(/.*/, (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+

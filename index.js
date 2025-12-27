@@ -32,7 +32,7 @@ const providers = {
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-let gameState = { status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 100.00, bidCost: 1.00, lastBidder: null, history: [], recentWinners: [], connectedUsers: 0, restartTimer: null, bidders: [], userInvestments: {} };
+let gameState = { status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 0.00, bidCost: 1.00, lastBidder: null, history: [], recentWinners: [], connectedUsers: 0, restartTimer: null, bidders: [], userInvestments: {} };
 
 // GAME LOOP
 setInterval(async () => {
@@ -51,7 +51,7 @@ setInterval(async () => {
     }
   } else if (gameState.status === 'ENDED') {
     if (now >= gameState.restartTimer) {
-      gameState.status = 'ACTIVE'; gameState.endTime = now + 300000; gameState.jackpot = 50.00; gameState.lastBidder = null; gameState.history = []; gameState.bidders = []; gameState.userInvestments = {};
+      gameState.status = 'ACTIVE'; gameState.endTime = now + 300000; gameState.jackpot = 0.00; gameState.lastBidder = null; gameState.history = []; gameState.bidders = []; gameState.userInvestments = {};
     }
   }
   io.emit('gameState', gameState);

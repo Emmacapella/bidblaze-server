@@ -5,15 +5,29 @@ const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const { ethers } = require('ethers');
-const TelegramBot = require('node-telegram-bot-api'); // ⚠️ NEW IMPORT
+
+// --- TELEGRAM CONFIG (SAFE MODE) ---
+// ⚠️ REPLACE THESE WITH YOUR REAL KEYS
+const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'; 
+const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID'; 
+
+let bot = null;
+try {
+    // This wraps the import in a safety block. 
+    // If the tool is missing, the server WON'T crash.
+    const TelegramBot = require('node-telegram-bot-api');
+    if (TELEGRAM_TOKEN && TELEGRAM_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN') {
+        bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
+        console.log("✅ Telegram Bot Active");
+    } else {
+        console.log("⚠️ Telegram Token missing - Alerts disabled (Server Running Safe Mode)");
+    }
+} catch (err) {
+    console.log("⚠️ Telegram tool not installed - Alerts disabled (Server Running Safe Mode)");
+}
 
 const app = express();
 app.use(cors());
-
-// --- TELEGRAM CONFIGURATION (REPLACE THESE!) ---
-const TELEGRAM_TOKEN = '8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI'; // Get from @BotFather
-const TELEGRAM_CHAT_ID = '6571047127'; // Get from @userinfobot or your channel ID
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
 // --- SUPABASE & WALLET ---
 const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
@@ -21,19 +35,21 @@ const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
 
-// --- HELPER: SEND TELEGRAM ALERT ---
+// --- HELPER: SAFE TELEGRAM ALERT ---
 const sendTelegram = (message) => {
-    if (TELEGRAM_TOKEN === 'YOUR_TELEGRAM_BOT_TOKEN') return; // Don't send if not set
+    if (!bot || !TELEGRAM_CHAT_ID) return; 
     bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' })
        .catch(err => console.error("Telegram Error:", err.message));
 };
 
 // PROVIDER SETUP
 const getProvider = (url) => {
-    if (ethers.providers && ethers.providers.JsonRpcProvider) {
-        return new ethers.providers.JsonRpcProvider(url); 
-    }
-    return new ethers.JsonRpcProvider(url); 
+    try {
+        if (ethers.providers && ethers.providers.JsonRpcProvider) {
+            return new ethers.providers.JsonRpcProvider(url); 
+        }
+        return new ethers.JsonRpcProvider(url); 
+    } catch (e) { return null; }
 };
 
 const providers = {
@@ -58,17 +74,14 @@ setInterval(async () => {
           const win = gameState.lastBidder;
           const amt = gameState.jackpot;
           
-          // DATABASE UPDATE
           const { data: u } = await supabase.from('users').select('balance').eq('email', win).single();
           if (u) await supabase.from('users').update({ balance: u.balance + amt }).eq('email', win);
           
           gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
           if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
-          // 🚨 TELEGRAM ALERT: WINNER
           sendTelegram(`🏆 *JACKPOT WON!*\n\n👤 User: \`${win}\`\n💰 Amount: *$${amt.toFixed(2)}*\n🔥 The game is restarting!`);
       } else {
-          // REFUND IF NO OPPONENTS
           if (gameState.lastBidder) {
              sendTelegram(`⚠️ *NO CONTEST*\nGame ended with only 1 player. Refund issued.`);
           }
@@ -93,8 +106,11 @@ io.on('connection', (socket) => {
     if (!u) { await supabase.from('users').insert([{ email, balance: 0.00 }]); u = { balance: 0.00 }; }
     socket.emit('balanceUpdate', u.balance);
     
-    const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
-    socket.emit('withdrawalHistory', w || []);
+    // SAFETY WRAPPER FOR WITHDRAWAL HISTORY
+    try {
+        const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        socket.emit('withdrawalHistory', w || []);
+    } catch(e) { socket.emit('withdrawalHistory', []); }
   });
 
   socket.on('placeBid', async (email) => {
@@ -109,16 +125,12 @@ io.on('connection', (socket) => {
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
     
-    // Anti-Snipe: Add time if < 10s
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
     
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
     
     io.emit('gameState', gameState);
-
-    // 🚨 TELEGRAM ALERT: BID (Optional: Comment out if too spammy)
-    // sendTelegram(`⚡ *New Bid*\nUser: ${email}\nJackpot: $${gameState.jackpot.toFixed(2)}`);
   });
 
   socket.on('requestWithdrawal', async ({ email, amount, address, network }) => {
@@ -144,12 +156,11 @@ io.on('connection', (socket) => {
           const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
           socket.emit('withdrawalHistory', w || []);
 
-          // 🚨 TELEGRAM ALERT: WITHDRAWAL
           sendTelegram(`💸 *WITHDRAWAL REQUEST*\n\nUser: \`${email}\`\nAmount: *$${amount}*\nNet: ${network}\nAddr: \`${address}\``);
 
       } catch (e) {
           console.error("Withdraw Error:", e.message);
-          socket.emit('withdrawalError', 'System Error. Try again.');
+          socket.emit('withdrawalError', 'System Error: ' + e.message);
       }
   });
 
@@ -175,8 +186,7 @@ io.on('connection', (socket) => {
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
 
-          // 🚨 TELEGRAM ALERT: DEPOSIT
-          sendTelegram(`💰 *DEPOSIT CONFIRMED*\n\nUser: \`${email}\`\nAmount: $${(amt*rate).toFixed(2)}\nTx: [View](${network === 'BSC' ? 'https://bscscan.com/tx/' : 'https://etherscan.io/tx/'}${txHash})`);
+          sendTelegram(`💰 *DEPOSIT CONFIRMED*\n\nUser: \`${email}\`\nAmount: $${(amt*rate).toFixed(2)}\nTx: ${txHash}`);
 
       } catch (e) {
           console.error("Deposit Crash:", e);

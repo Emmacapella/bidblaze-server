@@ -7,7 +7,6 @@ const cors = require('cors');
 const { ethers } = require('ethers');
 
 // --- TELEGRAM CONFIG (SAFE MODE) ---
-// ⚠️ REPLACE THESE WITH YOUR REAL KEYS
 const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';
 const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID';
 
@@ -40,21 +39,33 @@ const sendTelegram = (message) => {
        .catch(err => console.error("Telegram Error:", err.message));
 };
 
-// --- ROBUST PROVIDER SETUP (WITH FALLBACKS) ---
+// --- ROBUST PROVIDER SETUP (WITH ROTATION) ---
+// This prevents "Tx not found" when one RPC node is busy
 const getProvider = (networkKey) => {
     const urls = {
-        BSC: ['https://bsc-dataseed.binance.org/', 'https://bsc-dataseed1.defibit.io/', 'https://bsc-dataseed1.ninicoin.io/'],
-        ETH: ['https://cloudflare-eth.com', 'https://rpc.ankr.com/eth'],
-        BASE: ['https://mainnet.base.org', 'https://1rpc.io/base']
+        BSC: [
+          'https://bsc-dataseed.binance.org/', 
+          'https://bsc-dataseed1.defibit.io/', 
+          'https://bsc-dataseed1.ninicoin.io/'
+        ],
+        ETH: [
+          'https://cloudflare-eth.com', 
+          'https://rpc.ankr.com/eth'
+        ],
+        BASE: [
+          'https://mainnet.base.org', 
+          'https://1rpc.io/base'
+        ]
     };
 
-    // Use FallbackProvider if available, otherwise just first URL
     try {
+        // Safe check for Ethers v5 FallbackProvider
         if (ethers.providers && ethers.providers.FallbackProvider) {
             const providers = urls[networkKey].map(u => new ethers.providers.JsonRpcProvider(u));
-            return new ethers.providers.FallbackProvider(providers, 1); // 1 = quorum
+            return new ethers.providers.FallbackProvider(providers, 1);
         }
-        return new ethers.JsonRpcProvider(urls[networkKey][0]);
+        // Fallback for simple provider
+        return new ethers.providers.JsonRpcProvider(urls[networkKey][0]);
     } catch (e) { return null; }
 };
 
@@ -105,34 +116,28 @@ setInterval(async () => {
       // --- REFUND CONDITION (1 Player) ---
       } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
           const solePlayer = gameState.lastBidder;
-          // Calculate refund based on tracked investments
           const refundAmount = gameState.userInvestments[solePlayer] || 0;
 
           if (refundAmount > 0) {
               const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).single();
               if (u) {
-                  // REFUND: Give back exactly what they spent
                   await supabase.from('users').update({ balance: u.balance + refundAmount }).eq('email', solePlayer);
-                  
                   sendTelegram(`♻️ *REFUND ISSUED*\n\n👤 User: \`${solePlayer}\`\n💰 Refunded: *$${refundAmount.toFixed(2)}*\n⚠️ Reason: No opponents found.`);
-                  console.log(`Refunded ${solePlayer} $${refundAmount}`);
               }
           }
       } else {
-          // No bidders at all
           sendTelegram(`⚠️ *GAME ENDED*\nNo participants.`);
       }
     }
   } else if (gameState.status === 'ENDED') {
     if (now >= gameState.restartTimer) {
-      // RESET EVERYTHING
       gameState.status = 'ACTIVE'; 
       gameState.endTime = now + 300000; 
       gameState.jackpot = 50.00; 
       gameState.lastBidder = null; 
       gameState.history = []; 
       gameState.bidders = []; 
-      gameState.userInvestments = {}; // Clear investments for next round
+      gameState.userInvestments = {}; 
       
       sendTelegram(`🚀 *NEW GAME STARTED*\nJackpot: $50.00\nBid Cost: $1.00`);
     }
@@ -161,14 +166,11 @@ io.on('connection', (socket) => {
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
 
-    // 1. DEDUCT BALANCE
     await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
     socket.emit('balanceUpdate', u.balance - gameState.bidCost);
 
-    // 2. TRACK INVESTMENT (Critical for Refunds)
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
 
-    // 3. UPDATE GAME STATE
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
@@ -200,10 +202,6 @@ io.on('connection', (socket) => {
 
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
-
-          const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
-          socket.emit('withdrawalHistory', w || []);
-
           sendTelegram(`💸 *WITHDRAWAL REQUEST*\n\nUser: \`${email}\`\nAmount: *$${amount}*\nNet: ${network}\nAddr: \`${address}\``);
 
       } catch (e) {
@@ -212,25 +210,24 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- UPDATED VERIFY DEPOSIT: LONG TIMEOUT & RETRY ---
+  // --- UPDATED VERIFY DEPOSIT: 60s TIMEOUT ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          // ⚠️ FIX: Increased timeout to 60000ms (60s) because BSC/Base can be slow
-          // The provider automatically tries backups now
+          // Wait up to 60 seconds
           const tx = await provider.waitForTransaction(txHash, 1, 60000);
           
           if (!tx) { 
-              socket.emit('depositError', 'Tx verification timed out. Please contact admin if funds left wallet.'); 
+              socket.emit('depositError', 'Verification timed out. Contact Admin.'); 
               return; 
           }
 
           const txDetails = await provider.getTransaction(txHash);
           
-          // ⚠️ FIX: Case-insensitive Check
+          // Case-insensitive check
           if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { 
               socket.emit('depositError', 'Wrong Receiver'); 
               return; 
@@ -239,7 +236,7 @@ io.on('connection', (socket) => {
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
           const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
           const amt = parseFloat(formatEther(txDetails.value));
-          let rate = network === 'BSC' ? 600 : 3000; // Simplified rates
+          let rate = network === 'BSC' ? 600 : 3000;
           const newBal = u.balance + (amt * rate);
 
           await supabase.from('users').update({ balance: newBal }).eq('email', email);

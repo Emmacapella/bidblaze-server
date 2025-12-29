@@ -99,10 +99,16 @@ io.on('connection', (socket) => {
     }
     socket.emit('balanceUpdate', u.balance);
     
-    // Send history
+    // Fetch Withdrawal History
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
+    } catch(e) {}
+
+    // Fetch Deposit History (NEW)
+    try {
+        const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        socket.emit('depositHistory', d || []);
     } catch(e) {}
   });
 
@@ -122,7 +128,7 @@ io.on('connection', (socket) => {
     io.emit('gameState', gameState);
   });
 
-  // --- NEW: VERIFY DEPOSIT & WRITE TO TABLE ---
+  // --- VERIFY DEPOSIT & HISTORY UPDATE ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       console.log(`[DEPOSIT] Checking ${txHash} (${network}) for ${email}`);
       try {
@@ -154,8 +160,8 @@ io.on('connection', (socket) => {
           const newBal = u.balance + usd;
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
 
-          // 2. SAVE TO DEPOSITS TABLE (New!)
-          const { error: logError } = await supabase.from('deposits').insert([{
+          // 2. SAVE TO DEPOSITS TABLE
+          await supabase.from('deposits').insert([{
               user_email: email,
               amount: usd,
               network: network,
@@ -163,11 +169,14 @@ io.on('connection', (socket) => {
               status: 'COMPLETED'
           }]);
 
-          if (logError) console.error("Deposit Log Error:", logError);
-
           console.log(`[SUCCESS] Deposited $${usd} to ${email}`);
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
+          
+          // 3. EMIT UPDATED HISTORY (NEW)
+          const { data: history } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
+          socket.emit('depositHistory', history || []);
+
           sendTelegram(`💰 *DEPOSIT ($${usd.toFixed(2)})*\nUser: ${email}\nTx: ${txHash}`);
 
       } catch (e) {
@@ -186,6 +195,11 @@ io.on('connection', (socket) => {
           
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
+          
+          // Refresh Withdrawal History
+          const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+          socket.emit('withdrawalHistory', w || []);
+
           sendTelegram(`💸 *WITHDRAWAL*\nUser: ${email}\nAmt: $${amount}`);
       } catch (e) {
           socket.emit('withdrawalError', 'Withdrawal Failed');

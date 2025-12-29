@@ -7,8 +7,8 @@ const cors = require('cors');
 const { ethers } = require('ethers');
 
 // --- TELEGRAM CONFIG (SAFE MODE) ---
-const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';
-const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID';
+const TELEGRAM_TOKEN = '8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI';
+const TELEGRAM_CHAT_ID = '6571047127';
 
 let bot = null;
 try {
@@ -78,7 +78,7 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 let gameState = { 
     status: 'ACTIVE', 
     endTime: Date.now() + 300000, 
-    jackpot: 100.00, 
+    jackpot: 0.00, 
     bidCost: 1.00, 
     lastBidder: null, 
     history: [], 
@@ -128,7 +128,7 @@ setInterval(async () => {
     if (now >= gameState.restartTimer) {
       gameState.status = 'ACTIVE'; 
       gameState.endTime = now + 300000; 
-      gameState.jackpot = 50.00; 
+      gameState.jackpot = 0.00; 
       gameState.lastBidder = null; 
       gameState.history = []; 
       gameState.bidders = []; 
@@ -205,41 +205,72 @@ io.on('connection', (socket) => {
       }
   });
 
+  // --- UPDATED VERIFY DEPOSIT: ROBUST & LOGGING ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
-          console.log(`Verifying ${txHash} on ${network}...`);
+          console.log(`🔍 Verifying Deposit: ${txHash} on ${network} for ${email}`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
+          // 1. Wait for Transaction (Up to 60s)
           const tx = await provider.waitForTransaction(txHash, 1, 60000);
-          
           if (!tx) { 
               socket.emit('depositError', 'Verification timed out. Contact Admin.'); 
               return; 
           }
 
+          // 2. Get Transaction Details
           const txDetails = await provider.getTransaction(txHash);
+          if (!txDetails) {
+               socket.emit('depositError', 'Could not fetch TX details.'); 
+               return;
+          }
           
+          // 3. Verify Receiver
           if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { 
-              socket.emit('depositError', 'Wrong Receiver'); 
+              console.log(`❌ Wrong Wallet. Sent to: ${txDetails.to}, Admin: ${ADMIN_WALLET}`);
+              socket.emit('depositError', 'Sent to wrong wallet address.'); 
               return; 
           }
 
-          const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
+          // 4. Calculate Amount
           const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
           const amt = parseFloat(formatEther(txDetails.value));
-          let rate = network === 'BSC' ? 600 : 3000;
-          const newBal = u.balance + (amt * rate);
+          
+          if (amt <= 0) {
+              socket.emit('depositError', 'Deposit amount is zero.');
+              return;
+          }
 
-          await supabase.from('users').update({ balance: newBal }).eq('email', email);
+          let rate = network === 'BSC' ? 600 : 3000;
+          const dollarAmount = amt * rate;
+
+          // 5. Get User (Create if Missing)
+          let { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
+          
+          if (!u) {
+              console.log(`⚠️ User ${email} not found. Creating new record...`);
+              const { data: newUser, error: createError } = await supabase.from('users').insert([{ email, balance: 0.00 }]).select().single();
+              if (createError) throw new Error("Could not create user record.");
+              u = newUser;
+          }
+
+          // 6. Update Balance
+          const newBal = u.balance + dollarAmount;
+          console.log(`✅ Updating Balance: ${u.balance} -> ${newBal}`);
+
+          const { error: updateError } = await supabase.from('users').update({ balance: newBal }).eq('email', email);
+          if (updateError) throw new Error("Database Update Failed: " + updateError.message);
+
+          // 7. Success!
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
 
-          sendTelegram(`💰 *DEPOSIT CONFIRMED*\n\nUser: \`${email}\`\nAmount: $${(amt*rate).toFixed(2)}\nTx: ${txHash}`);
+          sendTelegram(`💰 *DEPOSIT CONFIRMED*\n\nUser: \`${email}\`\nAmount: $${dollarAmount.toFixed(2)}\nTx: ${txHash}`);
 
       } catch (e) {
-          console.error("Deposit Crash:", e);
-          socket.emit('depositError', 'Verification Error. Check Explorer.');
+          console.error("🚨 Deposit Crash:", e);
+          socket.emit('depositError', 'System Error. Transaction valid but DB update failed. Contact Admin.');
       }
   });
 

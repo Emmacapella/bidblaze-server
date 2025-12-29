@@ -40,20 +40,28 @@ const sendTelegram = (message) => {
        .catch(err => console.error("Telegram Error:", err.message));
 };
 
-// PROVIDER SETUP
-const getProvider = (url) => {
+// --- ROBUST PROVIDER SETUP (WITH FALLBACKS) ---
+const getProvider = (networkKey) => {
+    const urls = {
+        BSC: ['https://bsc-dataseed.binance.org/', 'https://bsc-dataseed1.defibit.io/', 'https://bsc-dataseed1.ninicoin.io/'],
+        ETH: ['https://cloudflare-eth.com', 'https://rpc.ankr.com/eth'],
+        BASE: ['https://mainnet.base.org', 'https://1rpc.io/base']
+    };
+
+    // Use FallbackProvider if available, otherwise just first URL
     try {
-        if (ethers.providers && ethers.providers.JsonRpcProvider) {
-            return new ethers.providers.JsonRpcProvider(url);
+        if (ethers.providers && ethers.providers.FallbackProvider) {
+            const providers = urls[networkKey].map(u => new ethers.providers.JsonRpcProvider(u));
+            return new ethers.providers.FallbackProvider(providers, 1); // 1 = quorum
         }
-        return new ethers.JsonRpcProvider(url);
+        return new ethers.JsonRpcProvider(urls[networkKey][0]);
     } catch (e) { return null; }
 };
 
 const providers = {
-    BSC: getProvider('https://bsc-dataseed.binance.org/'),
-    ETH: getProvider('https://cloudflare-eth.com'),
-    BASE: getProvider('https://mainnet.base.org')
+    BSC: getProvider('BSC'),
+    ETH: getProvider('ETH'),
+    BASE: getProvider('BASE')
 };
 
 const server = http.createServer(app);
@@ -204,7 +212,7 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- UPDATED VERIFY DEPOSIT: LONG TIMEOUT ---
+  // --- UPDATED VERIFY DEPOSIT: LONG TIMEOUT & RETRY ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
@@ -212,6 +220,7 @@ io.on('connection', (socket) => {
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
           // ⚠️ FIX: Increased timeout to 60000ms (60s) because BSC/Base can be slow
+          // The provider automatically tries backups now
           const tx = await provider.waitForTransaction(txHash, 1, 60000);
           
           if (!tx) { 

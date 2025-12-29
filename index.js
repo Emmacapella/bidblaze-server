@@ -204,22 +204,33 @@ io.on('connection', (socket) => {
       }
   });
 
+  // --- UPDATED VERIFY DEPOSIT: LONG TIMEOUT ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          const tx = await provider.waitForTransaction(txHash, 1, 10000);
-          if (!tx) { socket.emit('depositError', 'Tx not found yet. Wait.'); return; }
+          // ⚠️ FIX: Increased timeout to 60000ms (60s) because BSC/Base can be slow
+          const tx = await provider.waitForTransaction(txHash, 1, 60000);
+          
+          if (!tx) { 
+              socket.emit('depositError', 'Tx verification timed out. Please contact admin if funds left wallet.'); 
+              return; 
+          }
 
           const txDetails = await provider.getTransaction(txHash);
-          if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Wrong Receiver'); return; }
+          
+          // ⚠️ FIX: Case-insensitive Check
+          if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { 
+              socket.emit('depositError', 'Wrong Receiver'); 
+              return; 
+          }
 
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
           const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
           const amt = parseFloat(formatEther(txDetails.value));
-          let rate = network === 'BSC' ? 600 : 3000;
+          let rate = network === 'BSC' ? 600 : 3000; // Simplified rates
           const newBal = u.balance + (amt * rate);
 
           await supabase.from('users').update({ balance: newBal }).eq('email', email);

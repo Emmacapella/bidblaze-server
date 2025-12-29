@@ -40,7 +40,6 @@ const sendTelegram = (message) => {
 };
 
 // --- ROBUST PROVIDER SETUP (WITH ROTATION) ---
-// This prevents "Tx not found" when one RPC node is busy
 const getProvider = (networkKey) => {
     const urls = {
         BSC: [
@@ -59,13 +58,11 @@ const getProvider = (networkKey) => {
     };
 
     try {
-        // Safe check for Ethers v5 FallbackProvider
         if (ethers.providers && ethers.providers.FallbackProvider) {
             const providers = urls[networkKey].map(u => new ethers.providers.JsonRpcProvider(u));
             return new ethers.providers.FallbackProvider(providers, 1);
         }
-        // Fallback for simple provider
-        return new ethers.providers.JsonRpcProvider(urls[networkKey][0]);
+        return new ethers.JsonRpcProvider(urls[networkKey][0]);
     } catch (e) { return null; }
 };
 
@@ -89,7 +86,7 @@ let gameState = {
     connectedUsers: 0, 
     restartTimer: null, 
     bidders: [], 
-    userInvestments: {} // ⚠️ Tracks how much each user spent for refunds
+    userInvestments: {}
 };
 
 // GAME LOOP
@@ -100,7 +97,6 @@ setInterval(async () => {
       gameState.status = 'ENDED'; 
       gameState.restartTimer = now + 15000;
 
-      // --- WIN CONDITION (>1 Player) ---
       if (gameState.bidders.length > 1 && gameState.lastBidder) {
           const win = gameState.lastBidder;
           const amt = gameState.jackpot;
@@ -113,7 +109,6 @@ setInterval(async () => {
 
           sendTelegram(`🏆 *JACKPOT WON!*\n\n👤 User: \`${win}\`\n💰 Amount: *$${amt.toFixed(2)}*\n🔥 The game is restarting!`);
       
-      // --- REFUND CONDITION (1 Player) ---
       } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
           const solePlayer = gameState.lastBidder;
           const refundAmount = gameState.userInvestments[solePlayer] || 0;
@@ -210,14 +205,12 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- UPDATED VERIFY DEPOSIT: 60s TIMEOUT ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       try {
           console.log(`Verifying ${txHash} on ${network}...`);
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          // Wait up to 60 seconds
           const tx = await provider.waitForTransaction(txHash, 1, 60000);
           
           if (!tx) { 
@@ -227,7 +220,6 @@ io.on('connection', (socket) => {
 
           const txDetails = await provider.getTransaction(txHash);
           
-          // Case-insensitive check
           if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { 
               socket.emit('depositError', 'Wrong Receiver'); 
               return; 

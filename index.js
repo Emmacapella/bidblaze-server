@@ -8,13 +8,11 @@ const { ethers } = require('ethers');
 
 // --- TELEGRAM CONFIG (SAFE MODE) ---
 // ⚠️ REPLACE THESE WITH YOUR REAL KEYS
-const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'; 
-const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID'; 
+const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';
+const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID';
 
 let bot = null;
 try {
-    // This wraps the import in a safety block. 
-    // If the tool is missing, the server WON'T crash.
     const TelegramBot = require('node-telegram-bot-api');
     if (TELEGRAM_TOKEN && TELEGRAM_TOKEN !== 'YOUR_TELEGRAM_BOT_TOKEN') {
         bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
@@ -31,13 +29,13 @@ app.use(cors());
 
 // --- SUPABASE & WALLET ---
 const SUPABASE_URL = 'https://zshodgjnjqirmcqbzujm.supabase.co';
-const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz"; 
+const SUPABASE_KEY = "sb_secret_dxJx8Bv-KWIgeVvjJvxZEA_Fzxhsjjz";
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c"; 
+const ADMIN_WALLET = "0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c";
 
 // --- HELPER: SAFE TELEGRAM ALERT ---
 const sendTelegram = (message) => {
-    if (!bot || !TELEGRAM_CHAT_ID) return; 
+    if (!bot || !TELEGRAM_CHAT_ID) return;
     bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' })
        .catch(err => console.error("Telegram Error:", err.message));
 };
@@ -46,9 +44,9 @@ const sendTelegram = (message) => {
 const getProvider = (url) => {
     try {
         if (ethers.providers && ethers.providers.JsonRpcProvider) {
-            return new ethers.providers.JsonRpcProvider(url); 
+            return new ethers.providers.JsonRpcProvider(url);
         }
-        return new ethers.JsonRpcProvider(url); 
+        return new ethers.JsonRpcProvider(url);
     } catch (e) { return null; }
 };
 
@@ -61,35 +59,73 @@ const providers = {
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-let gameState = { status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 100.00, bidCost: 1.00, lastBidder: null, history: [], recentWinners: [], connectedUsers: 0, restartTimer: null, bidders: [], userInvestments: {} };
+let gameState = { 
+    status: 'ACTIVE', 
+    endTime: Date.now() + 300000, 
+    jackpot: 100.00, 
+    bidCost: 1.00, 
+    lastBidder: null, 
+    history: [], 
+    recentWinners: [], 
+    connectedUsers: 0, 
+    restartTimer: null, 
+    bidders: [], 
+    userInvestments: {} // ⚠️ Tracks how much each user spent for refunds
+};
 
 // GAME LOOP
 setInterval(async () => {
   const now = Date.now();
   if (gameState.status === 'ACTIVE') {
     if (now >= gameState.endTime) {
-      gameState.status = 'ENDED'; gameState.restartTimer = now + 15000; 
-      
+      gameState.status = 'ENDED'; 
+      gameState.restartTimer = now + 15000;
+
+      // --- WIN CONDITION (>1 Player) ---
       if (gameState.bidders.length > 1 && gameState.lastBidder) {
           const win = gameState.lastBidder;
           const amt = gameState.jackpot;
-          
+
           const { data: u } = await supabase.from('users').select('balance').eq('email', win).single();
           if (u) await supabase.from('users').update({ balance: u.balance + amt }).eq('email', win);
-          
+
           gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
           if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
           sendTelegram(`🏆 *JACKPOT WON!*\n\n👤 User: \`${win}\`\n💰 Amount: *$${amt.toFixed(2)}*\n🔥 The game is restarting!`);
-      } else {
-          if (gameState.lastBidder) {
-             sendTelegram(`⚠️ *NO CONTEST*\nGame ended with only 1 player. Refund issued.`);
+      
+      // --- REFUND CONDITION (1 Player) ---
+      } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
+          const solePlayer = gameState.lastBidder;
+          // Calculate refund based on tracked investments
+          const refundAmount = gameState.userInvestments[solePlayer] || 0;
+
+          if (refundAmount > 0) {
+              const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).single();
+              if (u) {
+                  // REFUND: Give back exactly what they spent
+                  await supabase.from('users').update({ balance: u.balance + refundAmount }).eq('email', solePlayer);
+                  
+                  sendTelegram(`♻️ *REFUND ISSUED*\n\n👤 User: \`${solePlayer}\`\n💰 Refunded: *$${refundAmount.toFixed(2)}*\n⚠️ Reason: No opponents found.`);
+                  console.log(`Refunded ${solePlayer} $${refundAmount}`);
+              }
           }
+      } else {
+          // No bidders at all
+          sendTelegram(`⚠️ *GAME ENDED*\nNo participants.`);
       }
     }
   } else if (gameState.status === 'ENDED') {
     if (now >= gameState.restartTimer) {
-      gameState.status = 'ACTIVE'; gameState.endTime = now + 300000; gameState.jackpot = 50.00; gameState.lastBidder = null; gameState.history = []; gameState.bidders = []; gameState.userInvestments = {};
+      // RESET EVERYTHING
+      gameState.status = 'ACTIVE'; 
+      gameState.endTime = now + 300000; 
+      gameState.jackpot = 50.00; 
+      gameState.lastBidder = null; 
+      gameState.history = []; 
+      gameState.bidders = []; 
+      gameState.userInvestments = {}; // Clear investments for next round
+      
       sendTelegram(`🚀 *NEW GAME STARTED*\nJackpot: $50.00\nBid Cost: $1.00`);
     }
   }
@@ -98,15 +134,14 @@ setInterval(async () => {
 
 io.on('connection', (socket) => {
   gameState.connectedUsers++;
-  
+
   socket.on('getUserBalance', async (email) => {
     if (!email) return;
     socket.join(email);
     let { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!u) { await supabase.from('users').insert([{ email, balance: 0.00 }]); u = { balance: 0.00 }; }
     socket.emit('balanceUpdate', u.balance);
-    
-    // SAFETY WRAPPER FOR WITHDRAWAL HISTORY
+
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
@@ -117,19 +152,24 @@ io.on('connection', (socket) => {
     if (gameState.status !== 'ACTIVE') return;
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
-    
+
+    // 1. DEDUCT BALANCE
     await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
     socket.emit('balanceUpdate', u.balance - gameState.bidCost);
-    
-    gameState.jackpot += (gameState.bidCost * 0.95); 
+
+    // 2. TRACK INVESTMENT (Critical for Refunds)
+    gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
+
+    // 3. UPDATE GAME STATE
+    gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-    
+
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-    
+
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
-    
+
     io.emit('gameState', gameState);
   });
 
@@ -144,15 +184,15 @@ io.on('connection', (socket) => {
           const { error: insertError } = await supabase.from('withdrawals').insert([
               { user_email: email, amount, wallet_address: address, network, status: 'PENDING' }
           ]);
-          
+
           if (insertError) {
               await supabase.from('users').update({ balance: u.balance }).eq('email', email);
-              throw insertError; 
+              throw insertError;
           }
 
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
-          
+
           const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
           socket.emit('withdrawalHistory', w || []);
 
@@ -170,16 +210,16 @@ io.on('connection', (socket) => {
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network'); return; }
 
-          const tx = await provider.waitForTransaction(txHash, 1, 10000); 
+          const tx = await provider.waitForTransaction(txHash, 1, 10000);
           if (!tx) { socket.emit('depositError', 'Tx not found yet. Wait.'); return; }
-          
+
           const txDetails = await provider.getTransaction(txHash);
           if (txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Wrong Receiver'); return; }
 
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
           const formatEther = ethers.utils ? ethers.utils.formatEther : ethers.formatEther;
           const amt = parseFloat(formatEther(txDetails.value));
-          let rate = network === 'BSC' ? 600 : 3000; 
+          let rate = network === 'BSC' ? 600 : 3000;
           const newBal = u.balance + (amt * rate);
 
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
@@ -195,7 +235,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('adminAction', ({ password, action, value }) => {
-     if (action === 'RESET') { gameState = { ...gameState, status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 50.00, history: [], bidders: [] }; }
+     if (action === 'RESET') { gameState = { ...gameState, status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 50.00, history: [], bidders: [], userInvestments: {} }; }
   });
   socket.on('disconnect', () => { gameState.connectedUsers--; });
 });

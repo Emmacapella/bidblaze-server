@@ -49,7 +49,22 @@ const providers = { BSC: getProvider('BSC'), ETH: getProvider('ETH'), BASE: getP
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" }, pingTimeout: 60000 });
 
-let gameState = { status: 'ACTIVE', endTime: Date.now()+300000, jackpot: 0.00, bidCost: 1.00, lastBidder: null, history: [], recentWinners: [], connectedUsers: 0, restartTimer: null, bidders: [], userInvestments: {} };
+// 🛡️ SECURITY: Track Cooldowns Here
+let lastBidTimes = {}; 
+
+let gameState = { 
+    status: 'ACTIVE', 
+    endTime: Date.now() + 300000, 
+    jackpot: 0.00, 
+    bidCost: 1.00, 
+    lastBidder: null, 
+    history: [], 
+    recentWinners: [], 
+    connectedUsers: 0, 
+    restartTimer: null, 
+    bidders: [], 
+    userInvestments: {} 
+};
 
 // GAME LOOP
 setInterval(async () => {
@@ -78,7 +93,9 @@ setInterval(async () => {
     }
   } else if (gameState.status === 'ENDED') {
     if (now >= gameState.restartTimer) {
+       // Reset Game & Clear Cooldowns
        gameState = { ...gameState, status: 'ACTIVE', endTime: now+300000, jackpot: 0.00, lastBidder: null, history: [], bidders: [], userInvestments: {} };
+       lastBidTimes = {}; // Clear cooldowns for new round
        io.emit('gameState', gameState);
     }
   }
@@ -91,7 +108,6 @@ io.on('connection', (socket) => {
   socket.on('getUserBalance', async (email) => {
     if (!email) return;
     socket.join(email);
-    // Auto-create user if missing
     let { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (!u) { 
         const { data: nu } = await supabase.from('users').insert([{ email, balance: 0.00 }]).select().single();
@@ -99,13 +115,11 @@ io.on('connection', (socket) => {
     }
     socket.emit('balanceUpdate', u.balance);
     
-    // Fetch Withdrawal History
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
     } catch(e) {}
 
-    // Fetch Deposit History (NEW)
     try {
         const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('depositHistory', d || []);
@@ -114,21 +128,39 @@ io.on('connection', (socket) => {
 
   socket.on('placeBid', async (email) => {
     if (gameState.status !== 'ACTIVE') return;
-    const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
-    if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
 
+    // 🛡️ SECURITY CHECK 1: COOLDOWN ENFORCEMENT
+    const now = Date.now();
+    const lastBidTime = lastBidTimes[email] || 0;
+    if (now - lastBidTime < 8000) { // 8000ms = 8 seconds
+        socket.emit('bidError', '⏳ Cooldown Active! Please wait.');
+        return;
+    }
+
+    // 🛡️ SECURITY CHECK 2: BALANCE CHECK
+    const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
+    if (!u || u.balance < gameState.bidCost) { 
+        socket.emit('bidError', 'Insufficient Funds'); 
+        return; 
+    }
+
+    // Apply Bid
     await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
     socket.emit('balanceUpdate', u.balance - gameState.bidCost);
+    
+    // Update State
+    lastBidTimes[email] = now; // Set new cooldown
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
+    
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
+    
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     io.emit('gameState', gameState);
   });
 
-  // --- VERIFY DEPOSIT & HISTORY UPDATE ---
   socket.on('verifyDeposit', async ({ email, txHash, network }) => {
       console.log(`[DEPOSIT] Checking ${txHash} (${network}) for ${email}`);
       try {
@@ -151,7 +183,6 @@ io.on('connection', (socket) => {
           const rate = network === 'BSC' ? 600 : 3000;
           const usd = amt * rate;
 
-          // 1. UPDATE USER BALANCE
           let { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
           if(!u) {
               const { data: nu } = await supabase.from('users').insert([{ email, balance: 0.00 }]).select().single();
@@ -160,7 +191,6 @@ io.on('connection', (socket) => {
           const newBal = u.balance + usd;
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
 
-          // 2. SAVE TO DEPOSITS TABLE
           await supabase.from('deposits').insert([{
               user_email: email,
               amount: usd,
@@ -173,7 +203,6 @@ io.on('connection', (socket) => {
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
           
-          // 3. EMIT UPDATED HISTORY (NEW)
           const { data: history } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
           socket.emit('depositHistory', history || []);
 
@@ -196,7 +225,6 @@ io.on('connection', (socket) => {
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
           
-          // Refresh Withdrawal History
           const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
           socket.emit('withdrawalHistory', w || []);
 

@@ -7,8 +7,8 @@ const cors = require('cors');
 const { ethers } = require('ethers');
 
 // --- TELEGRAM CONFIG ---
-const TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';
-const TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID';
+const TELEGRAM_TOKEN = '8480583530:AAGQgDDbiukiOIBgkP3tjJRU-hdhWCgvGhI';
+const TELEGRAM_CHAT_ID = '6571047127';
 
 let bot = null;
 try {
@@ -94,7 +94,7 @@ let lastBidTimes = {};
 let gameState = { 
     status: 'ACTIVE', 
     endTime: Date.now() + 300000, 
-    jackpot: 100.00, 
+    jackpot: 0.00, 
     bidCost: 1.00, 
     lastBidder: null, 
     history: [], 
@@ -144,7 +144,7 @@ setInterval(async () => {
           ...gameState, 
           status: 'ACTIVE', 
           endTime: now + 300000, 
-          jackpot: 50.00, 
+          jackpot: 0.00, 
           lastBidder: null, 
           history: [], 
           bidders: [], 

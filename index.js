@@ -12,10 +12,10 @@ const { ethers } = require('ethers');
 // --- CONFIGURATION ---
 // ⚠️ If .env is missing, these default strings prevent immediate crashes
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://zshodgjnjqirmcqbzujm.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'MISSING_KEY'; 
-const ADMIN_WALLET = process.env.ADMIN_WALLET || '0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c'; 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN; 
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID; 
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'MISSING_KEY';
+const ADMIN_WALLET = process.env.ADMIN_WALLET || '0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c';
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 // --- TELEGRAM CONFIG ---
 let bot = null;
@@ -189,10 +189,11 @@ io.on('connection', (socket) => {
   });
 
   // --- USER BALANCE LOGIC ---
-  socket.on('getUserBalance', async (email) => {
-    if (!email) return;
+  socket.on('getUserBalance', async (rawEmail) => {
+    if (!rawEmail) return;
+    const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
     socket.join(email);
-    
+
     // ⚠️ CRITICAL FIX: Use maybeSingle() to handle missing users without crashing
     let { data: u, error } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
 
@@ -203,7 +204,7 @@ io.on('connection', (socket) => {
             .insert([{ email, balance: 0.00 }])
             .select()
             .maybeSingle();
-            
+
         if (insertError) {
             console.error("DB Insert Error:", insertError.message);
             // Fallback object so app doesn't crash
@@ -212,7 +213,7 @@ io.on('connection', (socket) => {
             u = newUser;
         }
     }
-    
+
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
 
     // Fetch History (Safely)
@@ -229,8 +230,9 @@ io.on('connection', (socket) => {
   });
 
   // --- BID LOGIC ---
-  socket.on('placeBid', async (email) => {
+  socket.on('placeBid', async (rawEmail) => {
     if (gameState.status !== 'ACTIVE') return;
+    const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
 
     // Server-Side Cooldown
     const now = Date.now();
@@ -253,10 +255,10 @@ io.on('connection', (socket) => {
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-    
+
     // Anti-Snipe: Add time if < 10s
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-    
+
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
 
@@ -264,7 +266,8 @@ io.on('connection', (socket) => {
   });
 
   // --- DEPOSIT LOGIC ---
-  socket.on('verifyDeposit', async ({ email, txHash, network }) => {
+  socket.on('verifyDeposit', async ({ email: rawEmail, txHash, network }) => {
+      const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
       console.log(`[DEPOSIT START] ${email} - ${network} - ${txHash}`);
 
       try {
@@ -332,8 +335,9 @@ io.on('connection', (socket) => {
   });
 
   // --- WITHDRAWAL LOGIC ---
-  socket.on('requestWithdrawal', async ({ email, amount, address, network }) => {
+  socket.on('requestWithdrawal', async ({ email: rawEmail, amount, address, network }) => {
       try {
+          const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
           if (!u || u.balance < amount) { socket.emit('withdrawalError', 'Insufficient Balance'); return; }
 
@@ -341,12 +345,12 @@ io.on('connection', (socket) => {
           if (updateError) throw updateError;
 
           // Save to DB
-          const { error: insertError } = await supabase.from('withdrawals').insert([{ 
-              user_email: email, 
-              amount, 
-              wallet_address: address, 
-              network, 
-              status: 'PENDING' 
+          const { error: insertError } = await supabase.from('withdrawals').insert([{
+              user_email: email,
+              amount,
+              wallet_address: address,
+              network,
+              status: 'PENDING'
           }]);
 
           if (insertError) {

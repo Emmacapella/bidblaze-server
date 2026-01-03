@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const { ethers } = require('ethers');
+const bcrypt = require('bcryptjs'); // REQUIRED: npm install bcryptjs
 
 // --- CONFIGURATION ---
 // ⚠️ If .env is missing, these default strings prevent immediate crashes
@@ -188,34 +189,118 @@ io.on('connection', (socket) => {
       socket.emit('gameConfig', { adminWallet: ADMIN_WALLET });
   });
 
-  // --- USER BALANCE LOGIC ---
+  // --- 🆕 NEW: REGISTRATION (SIGN UP) ---
+  socket.on('register', async ({ username, email, password }) => {
+      if (!username || !email || !password) {
+          socket.emit('authError', 'All fields are required.');
+          return;
+      }
+      
+      const cleanEmail = email.toLowerCase().trim();
+
+      try {
+          // Check if email already exists
+          const { data: existingUser } = await supabase.from('users').select('email').eq('email', cleanEmail).maybeSingle();
+          if (existingUser) {
+              socket.emit('authError', 'Email already registered.');
+              return;
+          }
+
+          // Hash the password
+          const hashedPassword = await bcrypt.hash(password, 10);
+
+          // Insert into Supabase
+          const { data, error } = await supabase.from('users').insert([
+              { 
+                  username, 
+                  email: cleanEmail, 
+                  password_hash: hashedPassword, 
+                  balance: 0.00 
+              }
+          ]).select().single();
+
+          if (error) throw error;
+
+          // Success - Log them in immediately
+          socket.emit('authSuccess', { username: data.username, email: data.email, balance: data.balance });
+          console.log(`🆕 New User Registered: ${data.username} (${cleanEmail})`);
+
+      } catch (err) {
+          console.error("Registration Error:", err);
+          socket.emit('authError', 'Registration failed. Please try again.');
+      }
+  });
+
+  // --- 🆕 NEW: LOGIN ---
+  socket.on('login', async ({ email, password }) => {
+      if (!email || !password) {
+          socket.emit('authError', 'Email and password required.');
+          return;
+      }
+
+      const cleanEmail = email.toLowerCase().trim();
+
+      try {
+          // Fetch user
+          const { data: user, error } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
+          
+          if (error || !user) {
+              socket.emit('authError', 'User not found.');
+              return;
+          }
+
+          // Verify Password
+          if (!user.password_hash) {
+              socket.emit('authError', 'This account uses wallet login. Please use a wallet.');
+              return;
+          }
+
+          const match = await bcrypt.compare(password, user.password_hash);
+          if (!match) {
+              socket.emit('authError', 'Incorrect password.');
+              return;
+          }
+
+          // Success
+          socket.emit('authSuccess', { username: user.username, email: user.email, balance: user.balance });
+          console.log(`✅ User Logged In: ${user.username}`);
+
+      } catch (err) {
+          console.error("Login Error:", err);
+          socket.emit('authError', 'Login failed. Try again.');
+      }
+  });
+
+  // --- USER BALANCE LOGIC (UPDATED) ---
   socket.on('getUserBalance', async (rawEmail) => {
     if (!rawEmail) return;
-    const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
+    const email = rawEmail.toLowerCase().trim();
     socket.join(email);
 
     // ⚠️ CRITICAL FIX: Use maybeSingle() to handle missing users without crashing
-    let { data: u, error } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
+    // ⚠️ UPDATE: Also fetch 'username'
+    let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
-        console.log(`Creating new user: ${email}`);
+        console.log(`Creating new user (Wallet): ${email}`);
         const { data: newUser, error: insertError } = await supabase
             .from('users')
-            .insert([{ email, balance: 0.00 }])
+            .insert([{ email, balance: 0.00, username: 'Player' }])
             .select()
             .maybeSingle();
 
         if (insertError) {
             console.error("DB Insert Error:", insertError.message);
             // Fallback object so app doesn't crash
-            u = { balance: 0.00 };
+            u = { balance: 0.00, username: 'Player' };
         } else {
             u = newUser;
         }
     }
 
+    // Send Balance AND Username if available
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
-
+    
     // Fetch History (Safely)
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
@@ -232,7 +317,7 @@ io.on('connection', (socket) => {
   // --- BID LOGIC ---
   socket.on('placeBid', async (rawEmail) => {
     if (gameState.status !== 'ACTIVE') return;
-    const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
+    const email = rawEmail.toLowerCase().trim();
 
     // Server-Side Cooldown
     const now = Date.now();
@@ -261,13 +346,12 @@ io.on('connection', (socket) => {
 
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
-
     io.emit('gameState', gameState);
   });
 
   // --- DEPOSIT LOGIC ---
   socket.on('verifyDeposit', async ({ email: rawEmail, txHash, network }) => {
-      const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
+      const email = rawEmail.toLowerCase().trim();
       console.log(`[DEPOSIT START] ${email} - ${network} - ${txHash}`);
 
       try {
@@ -337,7 +421,7 @@ io.on('connection', (socket) => {
   // --- WITHDRAWAL LOGIC ---
   socket.on('requestWithdrawal', async ({ email: rawEmail, amount, address, network }) => {
       try {
-          const email = rawEmail.toLowerCase().trim(); // ⚠️ FIX: Normalize email case
+          const email = rawEmail.toLowerCase().trim();
           const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
           if (!u || u.balance < amount) { socket.emit('withdrawalError', 'Insufficient Balance'); return; }
 

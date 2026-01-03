@@ -36,7 +36,6 @@ const app = express();
 app.use(cors());
 
 // --- CRITICAL: HEALTH CHECK FOR RENDER ---
-// This prevents the "Timeout" error by telling Render "I am awake!"
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
@@ -72,12 +71,10 @@ const getProvider = (networkKey) => {
     const urlList = urls[networkKey];
 
     try {
-        // Try to use Ethers v5 FallbackProvider if available
         if (ethers.providers && ethers.providers.FallbackProvider) {
             const providers = urlList.map(u => new ethers.providers.JsonRpcProvider(u));
             return new ethers.providers.FallbackProvider(providers, 1);
         }
-        // Fallback to simple provider (v6 or v5)
         if (ethers.JsonRpcProvider) return new ethers.JsonRpcProvider(urlList[0]);
         return new ethers.providers.JsonRpcProvider(urlList[0]);
     } catch (e) {
@@ -161,7 +158,7 @@ setInterval(async () => {
               bidders: [],
               userInvestments: {}
           };
-          lastBidTimes = {}; // Reset cooldowns
+          lastBidTimes = {}; 
           io.emit('gameState', gameState);
         }
       }
@@ -191,7 +188,6 @@ io.on('connection', (socket) => {
       clearInterval(rateLimitInterval);
       gameState.connectedUsers--;
   });
-  // ----------------------------------------
 
   gameState.connectedUsers++;
 
@@ -199,24 +195,21 @@ io.on('connection', (socket) => {
       socket.emit('gameConfig', { adminWallet: ADMIN_WALLET });
   });
 
-  // --- 🆕 NEW: REGISTRATION (SIGN UP) WITH STRICT VALIDATION ---
+  // --- 🆕 REGISTRATION (Updated to fix "Wallet Account" issues) ---
   socket.on('register', async ({ username, email, password }) => {
       if (!username || !email || !password) {
           socket.emit('authError', 'All fields are required.');
           return;
       }
-      
       const cleanEmail = email.toLowerCase().trim();
       const cleanUsername = username.trim();
 
-      // 2. Validate Username (Alphabets & Numbers only)
       const usernameRegex = /^[a-zA-Z0-9]+$/;
       if (!usernameRegex.test(cleanUsername)) {
           socket.emit('authError', 'Username must contain only letters and numbers.');
           return;
       }
 
-      // 3. Validate Password (8 chars, 1 Upper, 1 Lower, 1 Special)
       const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/;
       if (!passwordRegex.test(password)) {
           socket.emit('authError', 'Password must be 8+ characters, with at least 1 uppercase, 1 lowercase, and 1 special character.');
@@ -224,40 +217,53 @@ io.on('connection', (socket) => {
       }
 
       try {
-          // 4. Check for EXISTING EMAIL
-          const { data: existingEmail } = await supabase.from('users').select('email').eq('email', cleanEmail).maybeSingle();
-          if (existingEmail) {
+          // Check for EXISTING EMAIL
+          const { data: existingEmailUser } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
+          
+          // If user exists AND already has a password, reject.
+          if (existingEmailUser && existingEmailUser.password_hash) {
               socket.emit('authError', 'Email already registered.');
               return;
           }
 
-          // 5. Check for EXISTING USERNAME
-          const { data: existingUser } = await supabase.from('users').select('username').eq('username', cleanUsername).maybeSingle();
-          if (existingUser) {
-              socket.emit('authError', 'Username is already taken.');
-              return;
+          // Check for EXISTING USERNAME (Unique check)
+          const { data: existingUsernameUser } = await supabase.from('users').select('id').eq('username', cleanUsername).maybeSingle();
+          // If username exists AND it's not the current "wallet" user we are updating
+          if (existingUsernameUser && (!existingEmailUser || existingUsernameUser.id !== existingEmailUser.id)) {
+               socket.emit('authError', 'Username is already taken.');
+               return;
           }
 
-          // 6. Hash Password & Save
+          // Hash Password
           const hashedPassword = await bcrypt.hash(password, 10);
 
-          const { data, error } = await supabase.from('users').insert([
-              { 
-                  username: cleanUsername, 
-                  email: cleanEmail, 
-                  password_hash: hashedPassword, 
-                  balance: 0.00 
-              }
-          ]).select().single();
-
-          if (error) {
-              console.error("Supabase Save Error:", error);
-              throw error;
+          let data, error;
+          
+          if (existingEmailUser) {
+              // UPDATE existing wallet user (The Fix for your issue!)
+              const { data: updated, error: upErr } = await supabase
+                  .from('users')
+                  .update({ username: cleanUsername, password_hash: hashedPassword })
+                  .eq('email', cleanEmail)
+                  .select()
+                  .single();
+              data = updated;
+              error = upErr;
+          } else {
+              // INSERT new user
+              const { data: inserted, error: inErr } = await supabase
+                  .from('users')
+                  .insert([{ username: cleanUsername, email: cleanEmail, password_hash: hashedPassword, balance: 0.00 }])
+                  .select()
+                  .single();
+              data = inserted;
+              error = inErr;
           }
 
-          // Success - Log them in
+          if (error) throw error;
+
           socket.emit('authSuccess', { username: data.username, email: data.email, balance: data.balance });
-          console.log(`🆕 New User Registered: ${data.username} (${cleanEmail})`);
+          console.log(`🆕 User Registered/Updated: ${data.username} (${cleanEmail})`);
 
       } catch (err) {
           console.error("Registration Error:", err);
@@ -265,43 +271,30 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- 🆕 NEW: LOGIN WITH EXISTENCE CHECK ---
+  // --- 🆕 LOGIN (Updated to give specific errors) ---
   socket.on('login', async ({ email, password }) => {
-      if (!email || !password) {
-          socket.emit('authError', 'Email and password required.');
-          return;
-      }
-
+      if (!email || !password) { socket.emit('authError', 'Email and password required.'); return; }
       const cleanEmail = email.toLowerCase().trim();
 
       try {
-          // 1. Check if User Exists
           const { data: user, error } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
           
-          if (error) {
-              console.error("Login DB Error:", error);
-              socket.emit('authError', 'System error during login.');
-              return;
-          }
+          if (error) { socket.emit('authError', 'System error.'); return; }
 
+          // 1. Check if user exists
           if (!user) {
-              socket.emit('authError', 'User not found. Please Sign Up first.');
+              socket.emit('authError', 'User does not exist.');
               return;
           }
 
-          // 2. Verify Password
-          if (!user.password_hash) {
-              socket.emit('authError', 'This account uses wallet login. Please connect wallet.');
-              return;
-          }
+          // 2. Check Password (treat null password as incorrect)
+          const isPasswordValid = user.password_hash && (await bcrypt.compare(password, user.password_hash));
 
-          const match = await bcrypt.compare(password, user.password_hash);
-          if (!match) {
+          if (!isPasswordValid) {
               socket.emit('authError', 'Incorrect password.');
               return;
           }
 
-          // Success
           socket.emit('authSuccess', { username: user.username, email: user.email, balance: user.balance });
           console.log(`✅ User Logged In: ${user.username}`);
 
@@ -311,38 +304,24 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- USER BALANCE LOGIC (UPDATED) ---
+  // --- USER BALANCE LOGIC ---
   socket.on('getUserBalance', async (rawEmail) => {
     if (!rawEmail) return;
     const email = rawEmail.toLowerCase().trim();
     socket.join(email);
 
-    // ⚠️ CRITICAL FIX: Use maybeSingle() to handle missing users without crashing
     let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
-        console.log(`Creating new user (Wallet): ${email}`);
-        const { data: newUser, error: insertError } = await supabase
-            .from('users')
-            .insert([{ email, balance: 0.00, username: 'Player' }])
-            .select()
-            .maybeSingle();
-
-        if (insertError) {
-            console.error("DB Insert Error:", insertError.message);
-            u = { balance: 0.00, username: 'Player' };
-        } else {
-            u = newUser;
-        }
+        // Auto-create for wallet users (NO PASSWORD)
+        const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player' }]).select().maybeSingle();
+        u = insertError ? { balance: 0.00, username: 'Player' } : newUser;
     }
-
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
-    
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
-    } catch(e) { socket.emit('withdrawalHistory', []); }
-
+    } catch(e) {}
     try {
         const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('depositHistory', d || []);
@@ -353,31 +332,20 @@ io.on('connection', (socket) => {
   socket.on('placeBid', async (rawEmail) => {
     if (gameState.status !== 'ACTIVE') return;
     const email = rawEmail.toLowerCase().trim();
-
-    // Server-Side Cooldown
     const now = Date.now();
-    const lastBidTime = lastBidTimes[email] || 0;
-    if (now - lastBidTime < 500) { 
-        return; 
-    }
-
+    if (now - (lastBidTimes[email]||0) < 500) return;
+    
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
-    if (!u || u.balance < gameState.bidCost) {
-        socket.emit('bidError', 'Insufficient Funds');
-        return;
-    }
-
+    if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
+    
     await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
     socket.emit('balanceUpdate', u.balance - gameState.bidCost);
-
     lastBidTimes[email] = now;
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
     io.emit('gameState', gameState);
@@ -386,23 +354,14 @@ io.on('connection', (socket) => {
   // --- DEPOSIT LOGIC ---
   socket.on('verifyDeposit', async ({ email: rawEmail, txHash, network }) => {
       const email = rawEmail.toLowerCase().trim();
-      console.log(`[DEPOSIT START] ${email} - ${network} - ${txHash}`);
-
       try {
           const provider = providers[network];
           if (!provider) { socket.emit('depositError', 'Invalid Network Provider'); return; }
-
           const tx = await provider.waitForTransaction(txHash, 1, 60000);
-          if (!tx) { socket.emit('depositError', 'Verification Timed Out or TX not found'); return; }
-
+          if (!tx) { socket.emit('depositError', 'Verification Timed Out'); return; }
           const txDetails = await provider.getTransaction(txHash);
-          if (!txDetails) { socket.emit('depositError', 'TX Details Missing'); return; }
-
-          if (!ADMIN_WALLET || txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) {
-              socket.emit('depositError', 'Funds sent to wrong address');
-              return;
-          }
-
+          if (!txDetails || txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Funds sent to wrong address'); return; }
+          
           const formatEther = ethers.formatEther || ethers.utils.formatEther;
           const rawAmt = parseFloat(formatEther(txDetails.value));
           if (rawAmt <= 0) { socket.emit('depositError', 'Zero amount detected'); return; }
@@ -411,20 +370,12 @@ io.on('connection', (socket) => {
           const dollarAmount = rawAmt * rate;
 
           const { error: insertError } = await supabase.from('deposits').insert([{
-              user_email: email,
-              amount: dollarAmount,
-              network: network,
-              tx_hash: txHash,
-              status: 'COMPLETED'
+              user_email: email, amount: dollarAmount, network, tx_hash: txHash, status: 'COMPLETED'
           }]);
 
           if (insertError) {
-              if (insertError.code === '23505') {
-                  socket.emit('depositError', 'Transaction already claimed!');
-              } else {
-                  console.error("DB Error:", insertError);
-                  socket.emit('depositError', 'Database Error. Check support.');
-              }
+              if (insertError.code === '23505') socket.emit('depositError', 'Transaction already claimed!');
+              else socket.emit('depositError', 'Database Error');
               return;
           }
 
@@ -433,20 +384,12 @@ io.on('connection', (socket) => {
               const { data: newUser } = await supabase.from('users').insert([{ email, balance: 0.00 }]).select().maybeSingle();
               u = newUser;
           }
-
           const newBal = u.balance + dollarAmount;
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
-
-          console.log(`[SUCCESS] Credited $${dollarAmount} to ${email}`);
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
-
           sendTelegram(`💰 *DEPOSIT SUCCESS*\nUser: \`${email}\`\nAmt: $${dollarAmount.toFixed(2)}`);
-
-      } catch (e) {
-          console.error("[DEPOSIT CRASH]", e);
-          socket.emit('depositError', 'Server Error during verification.');
-      }
+      } catch (e) { socket.emit('depositError', 'Server Error'); }
   });
 
   // --- WITHDRAWAL LOGIC ---
@@ -460,29 +403,17 @@ io.on('connection', (socket) => {
           if (updateError) throw updateError;
 
           const { error: insertError } = await supabase.from('withdrawals').insert([{
-              user_email: email,
-              amount,
-              wallet_address: address,
-              network,
-              status: 'PENDING'
+              user_email: email, amount, wallet_address: address, network, status: 'PENDING'
           }]);
 
           if (insertError) {
               await supabase.from('users').update({ balance: u.balance }).eq('email', email);
               throw insertError;
           }
-
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
-
-          const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
-          socket.emit('withdrawalHistory', w || []);
-
           sendTelegram(`💸 *WITHDRAWAL*\nUser: \`${email}\`\nAmt: $${amount}\nAddr: \`${address}\``);
-      } catch (e) {
-          console.error("Withdraw Error:", e);
-          socket.emit('withdrawalError', 'Withdrawal System Error');
-      }
+      } catch (e) { socket.emit('withdrawalError', 'Withdrawal System Error'); }
   });
 
   socket.on('adminAction', ({ password, action, value }) => {

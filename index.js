@@ -195,7 +195,7 @@ io.on('connection', (socket) => {
       socket.emit('gameConfig', { adminWallet: ADMIN_WALLET });
   });
 
-  // --- 🆕 REGISTRATION (Updated to fix "Wallet Account" issues) ---
+  // --- 🆕 REGISTRATION ---
   socket.on('register', async ({ username, email, password }) => {
       if (!username || !email || !password) {
           socket.emit('authError', 'All fields are required.');
@@ -217,30 +217,22 @@ io.on('connection', (socket) => {
       }
 
       try {
-          // Check for EXISTING EMAIL
           const { data: existingEmailUser } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
-          
-          // If user exists AND already has a password, reject.
           if (existingEmailUser && existingEmailUser.password_hash) {
               socket.emit('authError', 'Email already registered.');
               return;
           }
 
-          // Check for EXISTING USERNAME (Unique check)
           const { data: existingUsernameUser } = await supabase.from('users').select('id').eq('username', cleanUsername).maybeSingle();
-          // If username exists AND it's not the current "wallet" user we are updating
           if (existingUsernameUser && (!existingEmailUser || existingUsernameUser.id !== existingEmailUser.id)) {
                socket.emit('authError', 'Username is already taken.');
                return;
           }
 
-          // Hash Password
           const hashedPassword = await bcrypt.hash(password, 10);
-
           let data, error;
           
           if (existingEmailUser) {
-              // UPDATE existing wallet user (The Fix for your issue!)
               const { data: updated, error: upErr } = await supabase
                   .from('users')
                   .update({ username: cleanUsername, password_hash: hashedPassword })
@@ -250,7 +242,6 @@ io.on('connection', (socket) => {
               data = updated;
               error = upErr;
           } else {
-              // INSERT new user
               const { data: inserted, error: inErr } = await supabase
                   .from('users')
                   .insert([{ username: cleanUsername, email: cleanEmail, password_hash: hashedPassword, balance: 0.00 }])
@@ -263,6 +254,11 @@ io.on('connection', (socket) => {
           if (error) throw error;
 
           socket.emit('authSuccess', { username: data.username, email: data.email, balance: data.balance });
+          
+          // 🆕 TRIGGER HISTORY SEND ON REGISTRATION
+          socket.emit('depositHistory', []); // New user, empty history
+          socket.emit('withdrawalHistory', []);
+
           console.log(`🆕 User Registered/Updated: ${data.username} (${cleanEmail})`);
 
       } catch (err) {
@@ -271,7 +267,7 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- 🆕 LOGIN (Updated to give specific errors) ---
+  // --- 🆕 LOGIN ---
   socket.on('login', async ({ email, password }) => {
       if (!email || !password) { socket.emit('authError', 'Email and password required.'); return; }
       const cleanEmail = email.toLowerCase().trim();
@@ -280,22 +276,20 @@ io.on('connection', (socket) => {
           const { data: user, error } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
           
           if (error) { socket.emit('authError', 'System error.'); return; }
+          if (!user) { socket.emit('authError', 'User does not exist.'); return; }
 
-          // 1. Check if user exists
-          if (!user) {
-              socket.emit('authError', 'User does not exist.');
-              return;
-          }
-
-          // 2. Check Password (treat null password as incorrect)
           const isPasswordValid = user.password_hash && (await bcrypt.compare(password, user.password_hash));
-
-          if (!isPasswordValid) {
-              socket.emit('authError', 'Incorrect password.');
-              return;
-          }
+          if (!isPasswordValid) { socket.emit('authError', 'Incorrect password.'); return; }
 
           socket.emit('authSuccess', { username: user.username, email: user.email, balance: user.balance });
+          
+          // 🆕 TRIGGER HISTORY SEND ON LOGIN (This fixes your issue!)
+          const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
+          socket.emit('withdrawalHistory', w || []);
+
+          const { data: d } = await supabase.from('deposits').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
+          socket.emit('depositHistory', d || []);
+
           console.log(`✅ User Logged In: ${user.username}`);
 
       } catch (err) {
@@ -313,11 +307,12 @@ io.on('connection', (socket) => {
     let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
-        // Auto-create for wallet users (NO PASSWORD)
         const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player' }]).select().maybeSingle();
         u = insertError ? { balance: 0.00, username: 'Player' } : newUser;
     }
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
+    
+    // Also send history here for wallet users or page refreshes
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);

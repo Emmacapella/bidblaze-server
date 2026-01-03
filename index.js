@@ -189,49 +189,74 @@ io.on('connection', (socket) => {
       socket.emit('gameConfig', { adminWallet: ADMIN_WALLET });
   });
 
-  // --- 🆕 NEW: REGISTRATION (SIGN UP) ---
+  // --- 🆕 NEW: REGISTRATION (SIGN UP) WITH STRICT VALIDATION ---
   socket.on('register', async ({ username, email, password }) => {
+      // 1. Basic Field Check
       if (!username || !email || !password) {
           socket.emit('authError', 'All fields are required.');
           return;
       }
       
       const cleanEmail = email.toLowerCase().trim();
+      const cleanUsername = username.trim();
+
+      // 2. Validate Username (Alphabets & Numbers only)
+      const usernameRegex = /^[a-zA-Z0-9]+$/;
+      if (!usernameRegex.test(cleanUsername)) {
+          socket.emit('authError', 'Username must contain only letters and numbers.');
+          return;
+      }
+
+      // 3. Validate Password (8 chars, 1 Upper, 1 Lower, 1 Special)
+      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/;
+      if (!passwordRegex.test(password)) {
+          socket.emit('authError', 'Password must be 8+ characters, with at least 1 uppercase, 1 lowercase, and 1 special character.');
+          return;
+      }
 
       try {
-          // Check if email already exists
-          const { data: existingUser } = await supabase.from('users').select('email').eq('email', cleanEmail).maybeSingle();
-          if (existingUser) {
+          // 4. Check for EXISTING EMAIL
+          const { data: existingEmail } = await supabase.from('users').select('email').eq('email', cleanEmail).maybeSingle();
+          if (existingEmail) {
               socket.emit('authError', 'Email already registered.');
               return;
           }
 
-          // Hash the password
+          // 5. Check for EXISTING USERNAME
+          const { data: existingUser } = await supabase.from('users').select('username').eq('username', cleanUsername).maybeSingle();
+          if (existingUser) {
+              socket.emit('authError', 'Username is already taken.');
+              return;
+          }
+
+          // 6. Hash Password & Save
           const hashedPassword = await bcrypt.hash(password, 10);
 
-          // Insert into Supabase
           const { data, error } = await supabase.from('users').insert([
               { 
-                  username, 
+                  username: cleanUsername, 
                   email: cleanEmail, 
                   password_hash: hashedPassword, 
                   balance: 0.00 
               }
           ]).select().single();
 
-          if (error) throw error;
+          if (error) {
+              console.error("Supabase Save Error:", error);
+              throw error;
+          }
 
-          // Success - Log them in immediately
+          // Success - Log them in
           socket.emit('authSuccess', { username: data.username, email: data.email, balance: data.balance });
           console.log(`🆕 New User Registered: ${data.username} (${cleanEmail})`);
 
       } catch (err) {
           console.error("Registration Error:", err);
-          socket.emit('authError', 'Registration failed. Please try again.');
+          socket.emit('authError', 'Registration failed. Database error.');
       }
   });
 
-  // --- 🆕 NEW: LOGIN ---
+  // --- 🆕 NEW: LOGIN WITH EXISTENCE CHECK ---
   socket.on('login', async ({ email, password }) => {
       if (!email || !password) {
           socket.emit('authError', 'Email and password required.');
@@ -241,17 +266,23 @@ io.on('connection', (socket) => {
       const cleanEmail = email.toLowerCase().trim();
 
       try {
-          // Fetch user
+          // 1. Check if User Exists
           const { data: user, error } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
           
-          if (error || !user) {
-              socket.emit('authError', 'User not found.');
+          if (error) {
+              console.error("Login DB Error:", error);
+              socket.emit('authError', 'System error during login.');
               return;
           }
 
-          // Verify Password
+          if (!user) {
+              socket.emit('authError', 'User not found. Please Sign Up first.');
+              return;
+          }
+
+          // 2. Verify Password
           if (!user.password_hash) {
-              socket.emit('authError', 'This account uses wallet login. Please use a wallet.');
+              socket.emit('authError', 'This account uses wallet login. Please connect wallet.');
               return;
           }
 
@@ -278,7 +309,6 @@ io.on('connection', (socket) => {
     socket.join(email);
 
     // ⚠️ CRITICAL FIX: Use maybeSingle() to handle missing users without crashing
-    // ⚠️ UPDATE: Also fetch 'username'
     let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
@@ -291,24 +321,20 @@ io.on('connection', (socket) => {
 
         if (insertError) {
             console.error("DB Insert Error:", insertError.message);
-            // Fallback object so app doesn't crash
             u = { balance: 0.00, username: 'Player' };
         } else {
             u = newUser;
         }
     }
 
-    // Send Balance AND Username if available
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
     
-    // Fetch History (Safely)
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
     } catch(e) { socket.emit('withdrawalHistory', []); }
 
     try {
-        // If deposits table doesn't exist yet, this might fail, so we catch it
         const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('depositHistory', d || []);
     } catch(e) {}
@@ -322,8 +348,8 @@ io.on('connection', (socket) => {
     // Server-Side Cooldown
     const now = Date.now();
     const lastBidTime = lastBidTimes[email] || 0;
-    if (now - lastBidTime < 500) { // 0.5s absolute minimum between bids
-        return; // Silent ignore for spam
+    if (now - lastBidTime < 500) { 
+        return; 
     }
 
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
@@ -341,7 +367,6 @@ io.on('connection', (socket) => {
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
 
-    // Anti-Snipe: Add time if < 10s
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
 
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
@@ -364,7 +389,6 @@ io.on('connection', (socket) => {
           const txDetails = await provider.getTransaction(txHash);
           if (!txDetails) { socket.emit('depositError', 'TX Details Missing'); return; }
 
-          // Verify Recipient safely
           if (!ADMIN_WALLET || txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) {
               socket.emit('depositError', 'Funds sent to wrong address');
               return;
@@ -377,7 +401,6 @@ io.on('connection', (socket) => {
           let rate = network === 'BSC' ? 600 : 3000;
           const dollarAmount = rawAmt * rate;
 
-          // Prevent Replay Attacks via DB
           const { error: insertError } = await supabase.from('deposits').insert([{
               user_email: email,
               amount: dollarAmount,
@@ -387,7 +410,6 @@ io.on('connection', (socket) => {
           }]);
 
           if (insertError) {
-              // Duplicate error code check (Postgres specific)
               if (insertError.code === '23505') {
                   socket.emit('depositError', 'Transaction already claimed!');
               } else {
@@ -428,7 +450,6 @@ io.on('connection', (socket) => {
           const { error: updateError } = await supabase.from('users').update({ balance: u.balance - amount }).eq('email', email);
           if (updateError) throw updateError;
 
-          // Save to DB
           const { error: insertError } = await supabase.from('withdrawals').insert([{
               user_email: email,
               amount,
@@ -438,7 +459,6 @@ io.on('connection', (socket) => {
           }]);
 
           if (insertError) {
-              // Rollback balance if DB save fails
               await supabase.from('users').update({ balance: u.balance }).eq('email', email);
               throw insertError;
           }

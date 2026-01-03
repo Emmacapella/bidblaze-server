@@ -12,6 +12,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.89.0",
     "axios": "^1.13.2",
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "ethers": "^5.7.2",

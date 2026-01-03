@@ -35,6 +35,12 @@ try {
 const app = express();
 app.use(cors());
 
+// --- CRITICAL: HEALTH CHECK FOR RENDER ---
+// This prevents the "Timeout" error by telling Render "I am awake!"
+app.get('/health', (req, res) => {
+    res.status(200).send('OK');
+});
+
 // --- SUPABASE SETUP ---
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
@@ -109,56 +115,60 @@ let gameState = {
     userInvestments: {}
 };
 
-// --- GAME LOOP ---
+// --- GAME LOOP (CRASH PROTECTED) ---
 setInterval(async () => {
-  const now = Date.now();
-  if (gameState.status === 'ACTIVE') {
-    if (now >= gameState.endTime) {
-      gameState.status = 'ENDED';
-      gameState.restartTimer = now + 15000;
+  try {
+      const now = Date.now();
+      if (gameState.status === 'ACTIVE') {
+        if (now >= gameState.endTime) {
+          gameState.status = 'ENDED';
+          gameState.restartTimer = now + 15000;
 
-      if (gameState.bidders.length > 1 && gameState.lastBidder) {
-          const win = gameState.lastBidder;
-          const amt = gameState.jackpot;
+          if (gameState.bidders.length > 1 && gameState.lastBidder) {
+              const win = gameState.lastBidder;
+              const amt = gameState.jackpot;
 
-          const { data: u } = await supabase.from('users').select('balance').eq('email', win).maybeSingle();
-          if (u) await supabase.from('users').update({ balance: u.balance + amt }).eq('email', win);
+              const { data: u } = await supabase.from('users').select('balance').eq('email', win).maybeSingle();
+              if (u) await supabase.from('users').update({ balance: u.balance + amt }).eq('email', win);
 
-          gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
-          if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
+              gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
+              if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
-          sendTelegram(`🏆 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
+              sendTelegram(`🏆 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
 
-      } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
-          const solePlayer = gameState.lastBidder;
-          const refundAmount = gameState.userInvestments[solePlayer] || 0;
+          } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
+              const solePlayer = gameState.lastBidder;
+              const refundAmount = gameState.userInvestments[solePlayer] || 0;
 
-          if (refundAmount > 0) {
-              const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).maybeSingle();
-              if (u) {
-                  await supabase.from('users').update({ balance: u.balance + refundAmount }).eq('email', solePlayer);
-                  sendTelegram(`♻️ *REFUND*\nUser: \`${solePlayer}\`\nAmt: $${refundAmount.toFixed(2)}`);
+              if (refundAmount > 0) {
+                  const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).maybeSingle();
+                  if (u) {
+                      await supabase.from('users').update({ balance: u.balance + refundAmount }).eq('email', solePlayer);
+                      sendTelegram(`♻️ *REFUND*\nUser: \`${solePlayer}\`\nAmt: $${refundAmount.toFixed(2)}`);
+                  }
               }
           }
+        }
+      } else if (gameState.status === 'ENDED') {
+        if (now >= gameState.restartTimer) {
+          gameState = {
+              ...gameState,
+              status: 'ACTIVE',
+              endTime: now + 300000,
+              jackpot: 0.00,
+              lastBidder: null,
+              history: [],
+              bidders: [],
+              userInvestments: {}
+          };
+          lastBidTimes = {}; // Reset cooldowns
+          io.emit('gameState', gameState);
+        }
       }
-    }
-  } else if (gameState.status === 'ENDED') {
-    if (now >= gameState.restartTimer) {
-      gameState = {
-          ...gameState,
-          status: 'ACTIVE',
-          endTime: now + 300000,
-          jackpot: 0.00,
-          lastBidder: null,
-          history: [],
-          bidders: [],
-          userInvestments: {}
-      };
-      lastBidTimes = {}; // Reset cooldowns
       io.emit('gameState', gameState);
-    }
+  } catch (loopError) {
+      console.error("⚠️ Game Loop Hiccup (Prevented Crash):", loopError.message);
   }
-  io.emit('gameState', gameState);
 }, 1000);
 
 io.on('connection', (socket) => {
@@ -168,7 +178,7 @@ io.on('connection', (socket) => {
 
   socket.use((packet, next) => {
       messageCount++;
-      if (messageCount > 20) { // Increased slightly to prevent accidental kicks
+      if (messageCount > 20) {
           socket.disconnect(true);
           console.log(`🚫 Kicked spammer: ${socket.id}`);
           clearInterval(rateLimitInterval);
@@ -191,7 +201,6 @@ io.on('connection', (socket) => {
 
   // --- 🆕 NEW: REGISTRATION (SIGN UP) WITH STRICT VALIDATION ---
   socket.on('register', async ({ username, email, password }) => {
-      // 1. Basic Field Check
       if (!username || !email || !password) {
           socket.emit('authError', 'All fields are required.');
           return;
@@ -486,5 +495,7 @@ io.on('connection', (socket) => {
 
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get(/.*/, (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));
+
+// Listen on 0.0.0.0 to prevent binding issues on Docker/Render
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));

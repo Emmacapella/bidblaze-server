@@ -58,9 +58,11 @@ const otpStore = new Map(); // Stores { email: { code, expires } }
 
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 
+// REPLACE THE OLD sendEmailOTP FUNCTION WITH THIS:
+
 const sendEmailOTP = async (email, otp, type) => {
-    if (!RESEND_API_KEY) {
-        console.warn("⚠️ RESEND_API_KEY missing. OTP not sent.");
+    if (!resend) {
+        console.error("❌ Cannot send OTP. RESEND_API_KEY is missing.");
         return false;
     }
     try {
@@ -74,15 +76,25 @@ const sendEmailOTP = async (email, otp, type) => {
         </div>
         `;
         
-        await resend.emails.send({
-            from: 'BidBlaze <onboarding@resend.dev>', // Update this if you have a custom domain
+        // ⚠️ CHANGED: We now capture 'data' and 'error' from the response
+        const { data, error } = await resend.emails.send({
+            from: 'BidBlaze <onboarding@resend.dev>',
             to: [email],
             subject: subject,
             html: html
         });
+
+        // ⚠️ NEW: If Resend returns an error (like "sandbox mode"), we log it and return false
+        if (error) {
+            console.error("❌ Resend API Error:", error);
+            return false;
+        }
+
+        console.log("✅ Email sent successfully ID:", data.id);
         return true;
-    } catch (error) {
-        console.error("Email Error:", error);
+
+    } catch (err) {
+        console.error("❌ Unexpected Email Error:", err);
         return false;
     }
 };
@@ -304,7 +316,7 @@ io.on('connection', (socket) => {
           }
 
           const hashedPassword = await bcrypt.hash(password, 10);
-          
+
           const { data: inserted, error: inErr } = await supabase
               .from('users')
               .insert([{ username: cleanUsername, email: cleanEmail, password_hash: hashedPassword, balance: 0.00 }])
@@ -368,7 +380,7 @@ io.on('connection', (socket) => {
 
       try {
           const hashedPassword = await bcrypt.hash(newPassword, 10);
-          
+
           const { error } = await supabase
               .from('users')
               .update({ password_hash: hashedPassword })
@@ -429,8 +441,8 @@ io.on('connection', (socket) => {
     let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
-        // NOTE: We generally don't want to auto-create users here anymore if strict auth is on, 
-        // but for wallet connect users (Privy) we might still need this. 
+        // NOTE: We generally don't want to auto-create users here anymore if strict auth is on,
+        // but for wallet connect users (Privy) we might still need this.
         // Keeping logic as is for compatibility with Wallet Login.
         const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player' }]).select().maybeSingle();
         u = insertError ? { balance: 0.00, username: 'Player' } : newUser;

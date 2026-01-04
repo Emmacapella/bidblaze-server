@@ -76,7 +76,7 @@ const sendEmailOTP = async (email, otp, type) => {
         
         // ⚠️ Updated to use your verified domain
         const { data, error } = await resend.emails.send({
-            from: 'BidBlaze <Noreply@bidblaze.com>', 
+            from: 'BidBlaze <Noreply@bidblaze.xyz>', 
             to: [email],
             subject: subject,
             html: html

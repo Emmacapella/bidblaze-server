@@ -9,6 +9,7 @@ const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const { ethers } = require('ethers');
 const bcrypt = require('bcryptjs'); // REQUIRED: npm install bcryptjs
+const { Resend } = require('resend'); // REQUIRED: npm install resend
 
 // --- CONFIGURATION ---
 // ⚠️ If .env is missing, these default strings prevent immediate crashes
@@ -17,6 +18,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY || 'MISSING_KEY';
 const ADMIN_WALLET = process.env.ADMIN_WALLET || '0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c';
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const RESEND_API_KEY = process.env.RESEND_API_KEY; // Ensure this is in your .env
 
 // --- TELEGRAM CONFIG ---
 let bot = null;
@@ -40,14 +42,49 @@ app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// --- SUPABASE SETUP ---
+// --- SUPABASE & RESEND SETUP ---
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const resend = new Resend(RESEND_API_KEY);
 
 // --- HELPER: TELEGRAM ALERT ---
 const sendTelegram = (message) => {
     if (!bot || !TELEGRAM_CHAT_ID) return;
     bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' })
        .catch(err => console.error("Telegram Error:", err.message));
+};
+
+// --- HELPER: OTP GENERATOR & STORE ---
+const otpStore = new Map(); // Stores { email: { code, expires } }
+
+const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
+
+const sendEmailOTP = async (email, otp, type) => {
+    if (!RESEND_API_KEY) {
+        console.warn("⚠️ RESEND_API_KEY missing. OTP not sent.");
+        return false;
+    }
+    try {
+        const subject = type === 'signup' ? 'Welcome to BidBlaze! Verify your Account' : 'BidBlaze Password Reset';
+        const html = `
+        <div style="font-family: sans-serif; padding: 20px; background: #0f172a; color: white; text-align: center; border-radius: 10px;">
+            <h1 style="color: #fbbf24;">BidBlaze</h1>
+            <p style="color: #94a3b8;">Your verification code is:</p>
+            <h2 style="background: #334155; padding: 10px; letter-spacing: 5px; border-radius: 5px; display: inline-block;">${otp}</h2>
+            <p style="color: #64748b; font-size: 12px; margin-top: 20px;">This code expires in 5 minutes.</p>
+        </div>
+        `;
+        
+        await resend.emails.send({
+            from: 'BidBlaze <onboarding@resend.dev>', // Update this if you have a custom domain
+            to: [email],
+            subject: subject,
+            html: html
+        });
+        return true;
+    } catch (error) {
+        console.error("Email Error:", error);
+        return false;
+    }
 };
 
 // --- ROBUST PROVIDER SETUP ---
@@ -158,7 +195,7 @@ setInterval(async () => {
               bidders: [],
               userInvestments: {}
           };
-          lastBidTimes = {}; 
+          lastBidTimes = {};
           io.emit('gameState', gameState);
         }
       }
@@ -195,21 +232,58 @@ io.on('connection', (socket) => {
       socket.emit('gameConfig', { adminWallet: ADMIN_WALLET });
   });
 
-  // --- 🆕 REGISTRATION ---
-  socket.on('register', async ({ username, email, password }) => {
-      if (!username || !email || !password) {
-          socket.emit('authError', 'All fields are required.');
+  // ----------------------------------------------------------------------
+  // --- 📧 AUTHENTICATION & OTP LOGIC (EDITED) ---
+  // ----------------------------------------------------------------------
+
+  // 1. REQUEST SIGNUP OTP
+  socket.on('requestSignupOtp', async ({ email }) => {
+      if (!email) return socket.emit('authError', 'Email is required.');
+      const cleanEmail = email.toLowerCase().trim();
+
+      // Check if user already exists
+      const { data: existingUser } = await supabase.from('users').select('id').eq('email', cleanEmail).maybeSingle();
+      if (existingUser) {
+          return socket.emit('authError', 'Email is already registered. Please login.');
+      }
+
+      const otp = generateOTP();
+      otpStore.set(cleanEmail, { code: otp, expires: Date.now() + 300000 }); // 5 mins
+
+      const sent = await sendEmailOTP(cleanEmail, otp, 'signup');
+      if (sent) {
+          socket.emit('signupOtpSent');
+          console.log(`📧 OTP sent to ${cleanEmail}`);
+      } else {
+          socket.emit('authError', 'Failed to send OTP. Check server logs.');
+      }
+  });
+
+  // 2. COMPLETE REGISTRATION (Verify OTP)
+  socket.on('register', async ({ username, email, password, otp }) => {
+      if (!username || !email || !password || !otp) {
+          socket.emit('authError', 'All fields and OTP are required.');
           return;
       }
       const cleanEmail = email.toLowerCase().trim();
       const cleanUsername = username.trim();
 
+      // Verify OTP
+      const storedOtp = otpStore.get(cleanEmail);
+      if (!storedOtp || storedOtp.code !== otp) {
+          return socket.emit('authError', 'Invalid or expired OTP.');
+      }
+      if (Date.now() > storedOtp.expires) {
+          otpStore.delete(cleanEmail);
+          return socket.emit('authError', 'OTP has expired.');
+      }
+
+      // Existing Validation Logic
       const usernameRegex = /^[a-zA-Z0-9]+$/;
       if (!usernameRegex.test(cleanUsername)) {
           socket.emit('authError', 'Username must contain only letters and numbers.');
           return;
       }
-
       const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/;
       if (!passwordRegex.test(password)) {
           socket.emit('authError', 'Password must be 8+ characters, with at least 1 uppercase, 1 lowercase, and 1 special character.');
@@ -217,49 +291,36 @@ io.on('connection', (socket) => {
       }
 
       try {
+          // Double check existence (race condition check)
           const { data: existingEmailUser } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
-          if (existingEmailUser && existingEmailUser.password_hash) {
+          if (existingEmailUser) {
               socket.emit('authError', 'Email already registered.');
               return;
           }
-
           const { data: existingUsernameUser } = await supabase.from('users').select('id').eq('username', cleanUsername).maybeSingle();
-          if (existingUsernameUser && (!existingEmailUser || existingUsernameUser.id !== existingEmailUser.id)) {
+          if (existingUsernameUser) {
                socket.emit('authError', 'Username is already taken.');
                return;
           }
 
           const hashedPassword = await bcrypt.hash(password, 10);
-          let data, error;
           
-          if (existingEmailUser) {
-              const { data: updated, error: upErr } = await supabase
-                  .from('users')
-                  .update({ username: cleanUsername, password_hash: hashedPassword })
-                  .eq('email', cleanEmail)
-                  .select()
-                  .single();
-              data = updated;
-              error = upErr;
-          } else {
-              const { data: inserted, error: inErr } = await supabase
-                  .from('users')
-                  .insert([{ username: cleanUsername, email: cleanEmail, password_hash: hashedPassword, balance: 0.00 }])
-                  .select()
-                  .single();
-              data = inserted;
-              error = inErr;
-          }
+          const { data: inserted, error: inErr } = await supabase
+              .from('users')
+              .insert([{ username: cleanUsername, email: cleanEmail, password_hash: hashedPassword, balance: 0.00 }])
+              .select()
+              .single();
 
-          if (error) throw error;
+          if (inErr) throw inErr;
 
-          socket.emit('authSuccess', { username: data.username, email: data.email, balance: data.balance });
-          
-          // 🆕 TRIGGER HISTORY SEND ON REGISTRATION
-          socket.emit('depositHistory', []); // New user, empty history
+          // Clear used OTP
+          otpStore.delete(cleanEmail);
+
+          socket.emit('authSuccess', { username: inserted.username, email: inserted.email, balance: inserted.balance });
+          socket.emit('depositHistory', []);
           socket.emit('withdrawalHistory', []);
 
-          console.log(`🆕 User Registered/Updated: ${data.username} (${cleanEmail})`);
+          console.log(`🆕 User Verified & Registered: ${inserted.username}`);
 
       } catch (err) {
           console.error("Registration Error:", err);
@@ -267,14 +328,72 @@ io.on('connection', (socket) => {
       }
   });
 
-  // --- 🆕 LOGIN ---
+  // 3. REQUEST PASSWORD RESET OTP
+  socket.on('requestResetOtp', async ({ email }) => {
+      if (!email) return socket.emit('authError', 'Email is required.');
+      const cleanEmail = email.toLowerCase().trim();
+
+      // Check if user exists
+      const { data: user } = await supabase.from('users').select('id').eq('email', cleanEmail).maybeSingle();
+      if (!user) {
+          return socket.emit('authError', 'No account found with this email.');
+      }
+
+      const otp = generateOTP();
+      otpStore.set(cleanEmail, { code: otp, expires: Date.now() + 300000 });
+
+      const sent = await sendEmailOTP(cleanEmail, otp, 'reset');
+      if (sent) {
+          socket.emit('resetOtpSent');
+      } else {
+          socket.emit('authError', 'Failed to send reset email.');
+      }
+  });
+
+  // 4. COMPLETE PASSWORD RESET
+  socket.on('resetPassword', async ({ email, otp, newPassword }) => {
+      if (!email || !otp || !newPassword) return socket.emit('authError', 'Missing fields.');
+      const cleanEmail = email.toLowerCase().trim();
+
+      const storedOtp = otpStore.get(cleanEmail);
+      if (!storedOtp || storedOtp.code !== otp) {
+          return socket.emit('authError', 'Invalid or expired OTP.');
+      }
+
+      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[\W_]).{8,}$/;
+      if (!passwordRegex.test(newPassword)) {
+          socket.emit('authError', 'Password weak: 8+ chars, 1 Upper, 1 Lower, 1 Special.');
+          return;
+      }
+
+      try {
+          const hashedPassword = await bcrypt.hash(newPassword, 10);
+          
+          const { error } = await supabase
+              .from('users')
+              .update({ password_hash: hashedPassword })
+              .eq('email', cleanEmail);
+
+          if (error) throw error;
+
+          otpStore.delete(cleanEmail);
+          socket.emit('resetSuccess');
+          console.log(`🔐 Password reset for: ${cleanEmail}`);
+
+      } catch (err) {
+          console.error("Reset Error:", err);
+          socket.emit('authError', 'Database error during reset.');
+      }
+  });
+
+  // --- LOGIN (Standard) ---
   socket.on('login', async ({ email, password }) => {
       if (!email || !password) { socket.emit('authError', 'Email and password required.'); return; }
       const cleanEmail = email.toLowerCase().trim();
 
       try {
           const { data: user, error } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
-          
+
           if (error) { socket.emit('authError', 'System error.'); return; }
           if (!user) { socket.emit('authError', 'User does not exist.'); return; }
 
@@ -282,8 +401,7 @@ io.on('connection', (socket) => {
           if (!isPasswordValid) { socket.emit('authError', 'Incorrect password.'); return; }
 
           socket.emit('authSuccess', { username: user.username, email: user.email, balance: user.balance });
-          
-          // 🆕 TRIGGER HISTORY SEND ON LOGIN (This fixes your issue!)
+
           const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
           socket.emit('withdrawalHistory', w || []);
 
@@ -298,6 +416,10 @@ io.on('connection', (socket) => {
       }
   });
 
+  // ----------------------------------------------------------------------
+  // --- END AUTH LOGIC ---
+  // ----------------------------------------------------------------------
+
   // --- USER BALANCE LOGIC ---
   socket.on('getUserBalance', async (rawEmail) => {
     if (!rawEmail) return;
@@ -307,12 +429,14 @@ io.on('connection', (socket) => {
     let { data: u, error } = await supabase.from('users').select('balance, username').eq('email', email).maybeSingle();
 
     if (!u) {
+        // NOTE: We generally don't want to auto-create users here anymore if strict auth is on, 
+        // but for wallet connect users (Privy) we might still need this. 
+        // Keeping logic as is for compatibility with Wallet Login.
         const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player' }]).select().maybeSingle();
         u = insertError ? { balance: 0.00, username: 'Player' } : newUser;
     }
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
-    
-    // Also send history here for wallet users or page refreshes
+
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('withdrawalHistory', w || []);
@@ -329,10 +453,10 @@ io.on('connection', (socket) => {
     const email = rawEmail.toLowerCase().trim();
     const now = Date.now();
     if (now - (lastBidTimes[email]||0) < 500) return;
-    
+
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
     if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
-    
+
     await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
     socket.emit('balanceUpdate', u.balance - gameState.bidCost);
     lastBidTimes[email] = now;
@@ -356,7 +480,7 @@ io.on('connection', (socket) => {
           if (!tx) { socket.emit('depositError', 'Verification Timed Out'); return; }
           const txDetails = await provider.getTransaction(txHash);
           if (!txDetails || txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) { socket.emit('depositError', 'Funds sent to wrong address'); return; }
-          
+
           const formatEther = ethers.formatEther || ethers.utils.formatEther;
           const rawAmt = parseFloat(formatEther(txDetails.value));
           if (rawAmt <= 0) { socket.emit('depositError', 'Zero amount detected'); return; }

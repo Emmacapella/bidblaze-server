@@ -12,7 +12,7 @@ const bcrypt = require('bcryptjs'); // REQUIRED: npm install bcryptjs
 const { Resend } = require('resend'); // REQUIRED: npm install resend
 
 // --- CONFIGURATION ---
-// тЪая╕П If .env is missing, these default strings prevent immediate crashes
+// ⚠️ If .env is missing, these default strings prevent immediate crashes
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://zshodgjnjqirmcqbzujm.supabase.co';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || 'MISSING_KEY';
 const ADMIN_WALLET = process.env.ADMIN_WALLET || '0x6edadf13a704cd2518cd2ca9afb5ad9dee3ce34c';
@@ -26,12 +26,12 @@ try {
     const TelegramBot = require('node-telegram-bot-api');
     if (TELEGRAM_TOKEN) {
         bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
-        console.log("тЬЕ Telegram Bot Active");
+        console.log("Telegram Bot Active");
     } else {
-        console.log("тЪая╕П Telegram Token missing - Alerts disabled");
+        console.log("Telegram Token missing - Alerts disabled");
     }
 } catch (e) {
-    console.log("тЪая╕П Telegram disabled (Tool missing)");
+    console.log("Telegram disabled (Tool missing)");
 }
 
 const app = express();
@@ -60,7 +60,7 @@ const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString()
 
 const sendEmailOTP = async (email, otp, type) => {
     if (!resend) {
-        console.error("❌ Cannot send OTP. RESEND_API_KEY is missing.");
+        console.error("❌Cannot send OTP. RESEND_API_KEY is missing.");
         return false;
     }
     try {
@@ -74,9 +74,9 @@ const sendEmailOTP = async (email, otp, type) => {
         </div>
         `;
         
-        // ⚠️ Updated to use your verified domain
+        // 📧 Updated to use your verified domain
         const { data, error } = await resend.emails.send({
-            from: 'BidBlaze <Noreply@bidblaze.xyz>', 
+            from: 'BidBlaze <Noreply@bidblaze.com>', 
             to: [email],
             subject: subject,
             html: html
@@ -141,7 +141,7 @@ const io = new Server(server, {
     pingTimeout: 60000
 });
 
-// ЁЯЫбя╕П SECURITY: Track User Cooldowns Server-Side
+// 🛡️ SECURITY: Track User Cooldowns Server-Side
 let lastBidTimes = {};
 
 let gameState = {
@@ -177,7 +177,7 @@ setInterval(async () => {
               gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
               if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
-              sendTelegram(`ЁЯПЖ *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
+              sendTelegram(`🏆 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
 
           } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
               const solePlayer = gameState.lastBidder;
@@ -187,7 +187,7 @@ setInterval(async () => {
                   const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).maybeSingle();
                   if (u) {
                       await supabase.from('users').update({ balance: u.balance + refundAmount }).eq('email', solePlayer);
-                      sendTelegram(`тЩ╗я╕П *REFUND*\nUser: \`${solePlayer}\`\nAmt: $${refundAmount.toFixed(2)}`);
+                      sendTelegram(`♻️ *REFUND*\nUser: \`${solePlayer}\`\nAmt: $${refundAmount.toFixed(2)}`);
                   }
               }
           }
@@ -210,12 +210,12 @@ setInterval(async () => {
       }
       io.emit('gameState', gameState);
   } catch (loopError) {
-      console.error("тЪая╕П Game Loop Hiccup (Prevented Crash):", loopError.message);
+      console.error("Game Loop Hiccup (Prevented Crash):", loopError.message);
   }
 }, 1000);
 
 io.on('connection', (socket) => {
-  // --- ЁЯЫбя╕П ANTI-SPAM RATE LIMITER ---
+  // --- 🛡️ ANTI-SPAM RATE LIMITER ---
   let messageCount = 0;
   const rateLimitInterval = setInterval(() => { messageCount = 0; }, 1000);
 
@@ -223,7 +223,7 @@ io.on('connection', (socket) => {
       messageCount++;
       if (messageCount > 20) {
           socket.disconnect(true);
-          console.log(`ЁЯЪл Kicked spammer: ${socket.id}`);
+          console.log(`Kicked spammer: ${socket.id}`);
           clearInterval(rateLimitInterval);
           return;
       }
@@ -242,7 +242,7 @@ io.on('connection', (socket) => {
   });
 
   // ----------------------------------------------------------------------
-  // --- ЁЯУз AUTHENTICATION & OTP LOGIC (EDITED) ---
+  // --- 📧 AUTHENTICATION & OTP LOGIC (EDITED) ---
   // ----------------------------------------------------------------------
 
   // 1. REQUEST SIGNUP OTP
@@ -262,7 +262,7 @@ io.on('connection', (socket) => {
       const sent = await sendEmailOTP(cleanEmail, otp, 'signup');
       if (sent) {
           socket.emit('signupOtpSent');
-          console.log(`ЁЯУз OTP sent to ${cleanEmail}`);
+          console.log(`OTP sent to ${cleanEmail}`);
       } else {
           socket.emit('authError', 'Failed to send OTP. Check server logs.');
       }
@@ -329,7 +329,7 @@ io.on('connection', (socket) => {
           socket.emit('depositHistory', []);
           socket.emit('withdrawalHistory', []);
 
-          console.log(`ЁЯЖХ User Verified & Registered: ${inserted.username}`);
+          console.log(`🆕 User Verified & Registered: ${inserted.username}`);
 
       } catch (err) {
           console.error("Registration Error:", err);
@@ -387,7 +387,7 @@ io.on('connection', (socket) => {
 
           otpStore.delete(cleanEmail);
           socket.emit('resetSuccess');
-          console.log(`ЁЯФР Password reset for: ${cleanEmail}`);
+          console.log(`🔑 Password reset for: ${cleanEmail}`);
 
       } catch (err) {
           console.error("Reset Error:", err);
@@ -417,7 +417,7 @@ io.on('connection', (socket) => {
           const { data: d } = await supabase.from('deposits').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
           socket.emit('depositHistory', d || []);
 
-          console.log(`тЬЕ User Logged In: ${user.username}`);
+          console.log(`✅ User Logged In: ${user.username}`);
 
       } catch (err) {
           console.error("Login Error:", err);
@@ -516,7 +516,7 @@ io.on('connection', (socket) => {
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
-          sendTelegram(`ЁЯТ░ *DEPOSIT SUCCESS*\nUser: \`${email}\`\nAmt: $${dollarAmount.toFixed(2)}`);
+          sendTelegram(`💰 *DEPOSIT SUCCESS*\nUser: \`${email}\`\nAmt: $${dollarAmount.toFixed(2)}`);
       } catch (e) { socket.emit('depositError', 'Server Error'); }
   });
 
@@ -540,7 +540,7 @@ io.on('connection', (socket) => {
           }
           socket.emit('withdrawalSuccess', u.balance - amount);
           socket.emit('balanceUpdate', u.balance - amount);
-          sendTelegram(`ЁЯТ╕ *WITHDRAWAL*\nUser: \`${email}\`\nAmt: $${amount}\nAddr: \`${address}\``);
+          sendTelegram(`💸 *WITHDRAWAL*\nUser: \`${email}\`\nAmt: $${amount}\nAddr: \`${address}\``);
       } catch (e) { socket.emit('withdrawalError', 'Withdrawal System Error'); }
   });
 
@@ -558,3 +558,4 @@ app.get(/.*/, (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.htm
 // Listen on 0.0.0.0 to prevent binding issues on Docker/Render
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
+

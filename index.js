@@ -208,7 +208,9 @@ async function loadGameState() {
           console.log(`✅ Game State Restored from Database: Jackpot $${gameState.jackpot}`);
       } else {
           gameState.recentWinners = data.recent_winners || [];
-          console.log("ℹ️ Saved game expired, starting fresh.");
+          // 🆕 ALSO RESTORE HISTORY EVEN IF GAME EXPIRED
+          gameState.history = data.history || [];
+          console.log("ℹ️ Saved game expired, starting fresh (History Preserved).");
       }
     }
   } catch (e) {
@@ -266,10 +268,10 @@ setInterval(async () => {
               endTime: now + 300000,
               jackpot: 0.00,
               lastBidder: null,
-              history: [], // Clears visual board for new game
+              // 🆕 HISTORY IS NOW PRESERVED (Removed 'history: []')
               bidders: [],
               userInvestments: {},
-              recentWinners: gameState.recentWinners // Keep winners
+              recentWinners: gameState.recentWinners 
           };
           lastBidTimes = {};
           
@@ -281,7 +283,8 @@ setInterval(async () => {
               end_time: gameState.endTime,
               status: 'ACTIVE',
               last_bidder: null,
-              history: [],
+              // 🆕 SAVE PRESERVED HISTORY
+              history: gameState.history,
               user_investments: {},
               recent_winners: gameState.recentWinners
           }).eq('id', 1).then();
@@ -583,7 +586,8 @@ io.on('connection', (socket) => {
     const sequentialId = savedBid ? savedBid.id : Date.now(); // Fallback if DB fails (rare)
     gameState.history.unshift({ id: sequentialId, user: email, amount: gameState.bidCost });
     
-    if (gameState.history.length > 50) gameState.history.pop();
+    // 🆕 INCREASED LIMIT TO 100 (History preserved)
+    if (gameState.history.length > 100) gameState.history.pop();
     
     io.emit('gameState', gameState);
 

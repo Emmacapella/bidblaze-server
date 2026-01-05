@@ -266,7 +266,7 @@ setInterval(async () => {
               endTime: now + 300000,
               jackpot: 0.00,
               lastBidder: null,
-              history: [],
+              history: [], // Clears visual board for new game
               bidders: [],
               userInvestments: {},
               recentWinners: gameState.recentWinners // Keep winners
@@ -408,7 +408,7 @@ io.on('connection', (socket) => {
           socket.emit('authSuccess', { username: inserted.username, email: inserted.email, balance: inserted.balance });
           socket.emit('depositHistory', []);
           socket.emit('withdrawalHistory', []);
-          socket.emit('userBids', []); // Initialize empty bids
+          socket.emit('userBids', []); 
 
           console.log(`🆕 User Verified & Registered: ${inserted.username}`);
 
@@ -499,7 +499,7 @@ io.on('connection', (socket) => {
           socket.emit('depositHistory', d || []);
 
           // 🆕 FETCH BID HISTORY ON LOGIN
-          const { data: b } = await supabase.from('bids').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
+          const { data: b } = await supabase.from('bids').select('*').eq('user_email', cleanEmail).order('id', { ascending: false });
           socket.emit('userBids', b || []);
 
           console.log(`✅ User Logged In: ${user.username}`);
@@ -541,7 +541,7 @@ io.on('connection', (socket) => {
     } catch(e) {}
     // 🆕 FETCH BID HISTORY ON RELOAD/CONNECT
     try {
-        const { data: b } = await supabase.from('bids').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        const { data: b } = await supabase.from('bids').select('*').eq('user_email', email).order('id', { ascending: false });
         socket.emit('userBids', b || []);
     } catch(e) {}
   });
@@ -568,8 +568,8 @@ io.on('connection', (socket) => {
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (u) socket.emit('balanceUpdate', u.balance);
     
-    // 🆕 SAVE BID TO PERMANENT HISTORY
-    await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]);
+    // 🆕 SAVE BID TO DB & GET SEQUENTIAL ID
+    const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
     // ---------------------------------------------------------------
 
     lastBidTimes[email] = now;
@@ -578,7 +578,11 @@ io.on('connection', (socket) => {
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-    gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
+    
+    // 🆕 USE DATABASE ID FOR SEQUENTIAL NUMBERING
+    const sequentialId = savedBid ? savedBid.id : Date.now(); // Fallback if DB fails (rare)
+    gameState.history.unshift({ id: sequentialId, user: email, amount: gameState.bidCost });
+    
     if (gameState.history.length > 50) gameState.history.pop();
     
     io.emit('gameState', gameState);

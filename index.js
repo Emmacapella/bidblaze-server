@@ -35,7 +35,14 @@ try {
 }
 
 const app = express();
-app.use(cors());
+const io = new Server(server, {
+    cors: { 
+      origin: ["https://bidblaze.xyz", "http://localhost:5173"], 
+      methods: ["GET", "POST"] 
+    },
+    // ...
+});
+
 
 // --- CRITICAL: HEALTH CHECK FOR RENDER ---
 app.get('/health', (req, res) => {

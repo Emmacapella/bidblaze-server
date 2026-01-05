@@ -171,9 +171,8 @@ const io = new Server(server, {
 // 🛡️ SECURITY: Track User Cooldowns Server-Side
 let lastBidTimes = {};
 
-// ⚠️ INITIAL STATUS IS 'LOADING' TO BLOCK BIDS UNTIL DB LOADS
 let gameState = {
-    status: 'LOADING', 
+    status: 'ACTIVE',
     endTime: Date.now() + 300000,
     jackpot: 0.00,
     bidCost: 1.00,
@@ -187,43 +186,23 @@ let gameState = {
 };
 
 // --- 🛡️ CRITICAL: RESTORE GAME STATE FROM DB ON STARTUP ---
-// UPDATED: Now loads history, winners, and userInvestments to prevent data clearing.
 async function loadGameState() {
   try {
     const { data } = await supabase.from('game_state').select('*').eq('id', 1).maybeSingle();
     
     if (data) {
       if (parseInt(data.end_time) > Date.now()) {
-          // Game is still active/running
           gameState.jackpot = parseFloat(data.jackpot);
           gameState.endTime = parseInt(data.end_time);
           gameState.status = data.status;
           gameState.lastBidder = data.last_bidder;
-          
-          // 🛑 RESTORE LISTS FROM DB
-          gameState.history = data.history || [];
-          gameState.recentWinners = data.recent_winners || [];
-          gameState.userInvestments = data.user_investments || {};
-          
-          // Re-populate bidders list from investments keys
-          gameState.bidders = Object.keys(gameState.userInvestments);
-
-          console.log(`✅ Game State Restored: Jackpot $${gameState.jackpot} | History Count: ${gameState.history.length}`);
+          console.log(`✅ Game State Restored from Database: Jackpot $${gameState.jackpot}`);
       } else {
-          // Game expired while server was off. 
-          // We MUST load recentWinners to keep the hall of fame!
-          gameState.recentWinners = data.recent_winners || [];
-          gameState.status = 'ACTIVE'; // Unlock game
-          console.log("ℹ️ Saved game expired, starting fresh (Winners Preserved).");
+          console.log("ℹ️ Saved game expired, starting fresh.");
       }
-    } else {
-        // First run ever
-        gameState.status = 'ACTIVE'; 
     }
   } catch (e) {
     console.error("Failed to load game state:", e);
-    // Unblock game in case of error
-    gameState.status = 'ACTIVE'; 
   }
 }
 loadGameState(); 
@@ -233,10 +212,6 @@ loadGameState();
 setInterval(async () => {
   try {
       const now = Date.now();
-      
-      // 🛑 Don't run game logic if DB hasn't loaded yet
-      if (gameState.status === 'LOADING') return;
-
       if (gameState.status === 'ACTIVE') {
         if (now >= gameState.endTime) {
           gameState.status = 'ENDED';
@@ -266,12 +241,6 @@ setInterval(async () => {
                   }
               }
           }
-
-          // 🛑 SAVE WINNERS IMMEDIATELY AFTER GAME END
-          await supabase.from('game_state').update({ 
-              recent_winners: gameState.recentWinners,
-              status: 'ENDED'
-          }).eq('id', 1);
         }
       } else if (gameState.status === 'ENDED') {
         if (now >= gameState.restartTimer) {
@@ -281,25 +250,20 @@ setInterval(async () => {
               endTime: now + 300000,
               jackpot: 0.00,
               lastBidder: null,
-              history: [], // Clear history for new game
+              history: [],
               bidders: [],
-              userInvestments: {},
-              recentWinners: gameState.recentWinners // KEEP WINNERS in memory
+              userInvestments: {}
           };
           lastBidTimes = {};
           
           io.emit('gameState', gameState);
 
           // --- 🛡️ SAVE RESET TO DB ---
-          // UPDATED: Keeps 'recent_winners' but clears 'history' and 'user_investments'
           supabase.from('game_state').update({ 
               jackpot: 0.00, 
               end_time: gameState.endTime,
               status: 'ACTIVE',
-              last_bidder: null,
-              history: [],
-              user_investments: {},
-              recent_winners: gameState.recentWinners
+              last_bidder: null
           }).eq('id', 1).then();
           // ---------------------------
         }
@@ -554,9 +518,7 @@ io.on('connection', (socket) => {
 
   // --- BID LOGIC ---
   socket.on('placeBid', async (rawEmail) => {
-    // 🛡️ BLOCK BIDS IF LOADING TO PREVENT RACE CONDITIONS
     if (gameState.status !== 'ACTIVE') return;
-
     const email = rawEmail.toLowerCase().trim();
     const now = Date.now();
     if (now - (lastBidTimes[email]||0) < 500) return;
@@ -588,15 +550,12 @@ io.on('connection', (socket) => {
     
     io.emit('gameState', gameState);
 
-    // --- 🛡️ SAVE GAME STATE (HISTORY & INVESTMENTS) AFTER EVERY BID ---
-    // UPDATED: Now saves history and userInvestments to DB
+    // --- 🛡️ SAVE GAME STATE AFTER EVERY BID ---
     await supabase.from('game_state').update({ 
         jackpot: gameState.jackpot, 
         end_time: gameState.endTime,
         last_bidder: email,
-        status: 'ACTIVE',
-        history: gameState.history,
-        user_investments: gameState.userInvestments
+        status: 'ACTIVE'
     }).eq('id', 1);
     // ------------------------------------------
   });
@@ -665,14 +624,6 @@ io.on('connection', (socket) => {
           sendTelegram(`💸 *WITHDRAWAL*\nUser: \`${email}\`\nAmt: $${amount}\nAddr: \`${address}\``);
       } catch (e) { socket.emit('withdrawalError', 'Withdrawal System Error'); }
   });
-
-  socket.on('adminAction', ({ password, action, value }) => {
-     if (action === 'RESET') {
-         gameState = { ...gameState, status: 'ACTIVE', endTime: Date.now() + 300000, jackpot: 50.00, history: [], bidders: [], userInvestments: {} };
-         io.emit('gameState', gameState);
-     }
-  });
-});
 
 app.use(express.static(path.join(__dirname, 'dist')));
 app.get(/.*/, (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.html')));

@@ -196,8 +196,18 @@ async function loadGameState() {
           gameState.endTime = parseInt(data.end_time);
           gameState.status = data.status;
           gameState.lastBidder = data.last_bidder;
+          
+          // 🛑 RESTORE LISTS FROM DB
+          gameState.history = data.history || [];
+          gameState.recentWinners = data.recent_winners || [];
+          gameState.userInvestments = data.user_investments || {};
+          
+          // Re-populate bidders list from investments keys
+          gameState.bidders = Object.keys(gameState.userInvestments);
+
           console.log(`✅ Game State Restored from Database: Jackpot $${gameState.jackpot}`);
       } else {
+          gameState.recentWinners = data.recent_winners || [];
           console.log("ℹ️ Saved game expired, starting fresh.");
       }
     }
@@ -241,6 +251,12 @@ setInterval(async () => {
                   }
               }
           }
+          
+           // 🛑 SAVE WINNERS IMMEDIATELY AFTER GAME END
+           await supabase.from('game_state').update({ 
+              recent_winners: gameState.recentWinners,
+              status: 'ENDED'
+          }).eq('id', 1);
         }
       } else if (gameState.status === 'ENDED') {
         if (now >= gameState.restartTimer) {
@@ -252,7 +268,8 @@ setInterval(async () => {
               lastBidder: null,
               history: [],
               bidders: [],
-              userInvestments: {}
+              userInvestments: {},
+              recentWinners: gameState.recentWinners // Keep winners
           };
           lastBidTimes = {};
           
@@ -263,7 +280,10 @@ setInterval(async () => {
               jackpot: 0.00, 
               end_time: gameState.endTime,
               status: 'ACTIVE',
-              last_bidder: null
+              last_bidder: null,
+              history: [],
+              user_investments: {},
+              recent_winners: gameState.recentWinners
           }).eq('id', 1).then();
           // ---------------------------
         }
@@ -388,6 +408,7 @@ io.on('connection', (socket) => {
           socket.emit('authSuccess', { username: inserted.username, email: inserted.email, balance: inserted.balance });
           socket.emit('depositHistory', []);
           socket.emit('withdrawalHistory', []);
+          socket.emit('userBids', []); // Initialize empty bids
 
           console.log(`🆕 User Verified & Registered: ${inserted.username}`);
 
@@ -477,6 +498,10 @@ io.on('connection', (socket) => {
           const { data: d } = await supabase.from('deposits').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
           socket.emit('depositHistory', d || []);
 
+          // 🆕 FETCH BID HISTORY ON LOGIN
+          const { data: b } = await supabase.from('bids').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
+          socket.emit('userBids', b || []);
+
           console.log(`✅ User Logged In: ${user.username}`);
 
       } catch (err) {
@@ -514,6 +539,11 @@ io.on('connection', (socket) => {
         const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
         socket.emit('depositHistory', d || []);
     } catch(e) {}
+    // 🆕 FETCH BID HISTORY ON RELOAD/CONNECT
+    try {
+        const { data: b } = await supabase.from('bids').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        socket.emit('userBids', b || []);
+    } catch(e) {}
   });
 
   // --- BID LOGIC ---
@@ -537,6 +567,9 @@ io.on('connection', (socket) => {
     // Fetch updated balance to show user immediately
     const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
     if (u) socket.emit('balanceUpdate', u.balance);
+    
+    // 🆕 SAVE BID TO PERMANENT HISTORY
+    await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]);
     // ---------------------------------------------------------------
 
     lastBidTimes[email] = now;
@@ -555,7 +588,9 @@ io.on('connection', (socket) => {
         jackpot: gameState.jackpot, 
         end_time: gameState.endTime,
         last_bidder: email,
-        status: 'ACTIVE'
+        status: 'ACTIVE',
+        history: gameState.history,
+        user_investments: gameState.userInvestments
     }).eq('id', 1);
     // ------------------------------------------
   });

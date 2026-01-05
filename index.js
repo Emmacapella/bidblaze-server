@@ -60,7 +60,7 @@ const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString()
 
 const sendEmailOTP = async (email, otp, type) => {
     if (!resend) {
-        console.error("❌Cannot send OTP. RESEND_API_KEY is missing.");
+        console.error("❌ Cannot send OTP. RESEND_API_KEY is missing.");
         return false;
     }
     try {
@@ -158,6 +158,29 @@ let gameState = {
     userInvestments: {}
 };
 
+// --- 🛡️ CRITICAL: RESTORE GAME STATE FROM DB ON STARTUP ---
+async function loadGameState() {
+  try {
+    const { data } = await supabase.from('game_state').select('*').eq('id', 1).maybeSingle();
+    
+    if (data) {
+      if (parseInt(data.end_time) > Date.now()) {
+          gameState.jackpot = parseFloat(data.jackpot);
+          gameState.endTime = parseInt(data.end_time);
+          gameState.status = data.status;
+          gameState.lastBidder = data.last_bidder;
+          console.log(`✅ Game State Restored from Database: Jackpot $${gameState.jackpot}`);
+      } else {
+          console.log("ℹ️ Saved game expired, starting fresh.");
+      }
+    }
+  } catch (e) {
+    console.error("Failed to load game state:", e);
+  }
+}
+loadGameState(); 
+// -----------------------------------------------------------
+
 // --- GAME LOOP (CRASH PROTECTED) ---
 setInterval(async () => {
   try {
@@ -177,7 +200,7 @@ setInterval(async () => {
               gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
               if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
-              sendTelegram(`🏆 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
+              sendTelegram(`🎉 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
 
           } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
               const solePlayer = gameState.lastBidder;
@@ -205,7 +228,17 @@ setInterval(async () => {
               userInvestments: {}
           };
           lastBidTimes = {};
+          
           io.emit('gameState', gameState);
+
+          // --- 🛡️ SAVE RESET TO DB ---
+          supabase.from('game_state').update({ 
+              jackpot: 0.00, 
+              end_time: gameState.endTime,
+              status: 'ACTIVE',
+              last_bidder: null
+          }).eq('id', 1).then();
+          // ---------------------------
         }
       }
       io.emit('gameState', gameState);
@@ -242,7 +275,7 @@ io.on('connection', (socket) => {
   });
 
   // ----------------------------------------------------------------------
-  // --- 📧 AUTHENTICATION & OTP LOGIC (EDITED) ---
+  // --- 🔐 AUTHENTICATION & OTP LOGIC (EDITED) ---
   // ----------------------------------------------------------------------
 
   // 1. REQUEST SIGNUP OTP
@@ -387,7 +420,7 @@ io.on('connection', (socket) => {
 
           otpStore.delete(cleanEmail);
           socket.emit('resetSuccess');
-          console.log(`🔑 Password reset for: ${cleanEmail}`);
+          console.log(`🔐 Password reset for: ${cleanEmail}`);
 
       } catch (err) {
           console.error("Reset Error:", err);
@@ -463,11 +496,22 @@ io.on('connection', (socket) => {
     const now = Date.now();
     if (now - (lastBidTimes[email]||0) < 500) return;
 
-    const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
-    if (!u || u.balance < gameState.bidCost) { socket.emit('bidError', 'Insufficient Funds'); return; }
+    // --- 🛡️ SECURE ATOMIC TRANSACTION (Prevents Race Conditions) ---
+    const { data: success, error } = await supabase.rpc('deduct_balance', { 
+        user_email: email, 
+        amount: gameState.bidCost 
+    });
 
-    await supabase.from('users').update({ balance: u.balance - gameState.bidCost }).eq('email', email);
-    socket.emit('balanceUpdate', u.balance - gameState.bidCost);
+    if (error || !success) { 
+        socket.emit('bidError', 'Insufficient Funds'); 
+        return; 
+    }
+    
+    // Fetch updated balance to show user immediately
+    const { data: u } = await supabase.from('users').select('balance').eq('email', email).single();
+    if (u) socket.emit('balanceUpdate', u.balance);
+    // ---------------------------------------------------------------
+
     lastBidTimes[email] = now;
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
@@ -476,7 +520,17 @@ io.on('connection', (socket) => {
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
     gameState.history.unshift({ id: Date.now(), user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
+    
     io.emit('gameState', gameState);
+
+    // --- 🛡️ SAVE GAME STATE AFTER EVERY BID ---
+    await supabase.from('game_state').update({ 
+        jackpot: gameState.jackpot, 
+        end_time: gameState.endTime,
+        last_bidder: email,
+        status: 'ACTIVE'
+    }).eq('id', 1);
+    // ------------------------------------------
   });
 
   // --- DEPOSIT LOGIC ---
@@ -558,4 +612,3 @@ app.get(/.*/, (req, res) => res.sendFile(path.join(__dirname, 'dist', 'index.htm
 // Listen on 0.0.0.0 to prevent binding issues on Docker/Render
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => console.log(`Server running on port ${PORT}`));
-

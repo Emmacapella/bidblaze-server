@@ -35,14 +35,27 @@ try {
 }
 
 const app = express();
-const io = new Server(server, {
-    cors: { 
-      origin: ["https://bidblaze.xyz", "http://localhost:5173"], 
-      methods: ["GET", "POST"] 
-    },
-    // ...
-});
 
+// --- 🛡️ SECURITY FIX #4: CORS (Access Control) ---
+// Only allow your website and localhost to connect
+const allowedOrigins = [
+  "https://bidblaze.xyz",
+  "https://www.bidblaze.xyz",
+  "http://localhost:5173", // Vite Localhost
+  "http://localhost:3000"
+];
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) === -1) {
+      return callback(new Error('The CORS policy for this site does not allow access from the specified Origin.'), false);
+    }
+    return callback(null, true);
+  }
+}));
+// ------------------------------------------------
 
 // --- CRITICAL: HEALTH CHECK FOR RENDER ---
 app.get('/health', (req, res) => {
@@ -143,10 +156,17 @@ const providers = {
 };
 
 const server = http.createServer(app);
+
+// --- 🛡️ SECURITY FIX #4: SOCKET CORS ---
 const io = new Server(server, {
-    cors: { origin: "*", methods: ["GET", "POST"] },
+    cors: { 
+        origin: allowedOrigins, 
+        methods: ["GET", "POST"],
+        credentials: true
+    },
     pingTimeout: 60000
 });
+// --------------------------------------
 
 // 🛡️ SECURITY: Track User Cooldowns Server-Side
 let lastBidTimes = {};

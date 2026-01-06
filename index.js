@@ -223,22 +223,86 @@ async function loadGameState() {
 loadGameState(); 
 // -----------------------------------------------------------
 
+// --- ⚡ NEW HELPER: EXECUTE BID ---
+// This function handles the bidding logic centrally.
+// It is used by both the "placeBid" socket event AND the Auto-Bidder loop.
+async function executeBid(email) {
+    if (gameState.status !== 'ACTIVE') return false;
+    
+    // Server-side Cooldown Check (500ms)
+    const now = Date.now();
+    if (now - (lastBidTimes[email]||0) < 500) return false;
+
+    // 1. Atomic Balance Deduction (Safe against race conditions)
+    // REQUIRES the 'deduct_balance' SQL function in Supabase
+    const { data: success, error } = await supabase.rpc('deduct_balance', { 
+        user_email: email, 
+        amount: gameState.bidCost 
+    });
+
+    if (error || !success) return false; // Fail if insufficient funds
+
+    // 2. Update Stats & Balance for User
+    const { data: u } = await supabase.from('users').select('balance, total_bidded').eq('email', email).single();
+    if (u) {
+        // Send new balance to the user immediately
+        io.to(email).emit('balanceUpdate', u.balance);
+        // Track stats
+        await supabase.from('users').update({ total_bidded: (u.total_bidded || 0) + gameState.bidCost }).eq('email', email);
+    }
+
+    // 3. Record Bid in DB
+    const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
+    
+    // 4. Update Game State
+    lastBidTimes[email] = now;
+    gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
+    gameState.jackpot += (gameState.bidCost * 0.95);
+    gameState.lastBidder = email;
+    if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
+    
+    // Extend Timer Logic
+    if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
+    
+    // Update History
+    const sequentialId = savedBid ? savedBid.id : Date.now();
+    gameState.history.unshift({ id: sequentialId, user: email, amount: gameState.bidCost });
+    if (gameState.history.length > 50) gameState.history.pop();
+    
+    // Broadcast to all clients
+    io.emit('gameState', gameState);
+
+    // 5. Save State to DB
+    await supabase.from('game_state').update({ 
+        jackpot: gameState.jackpot, 
+        end_time: gameState.endTime,
+        last_bidder: email,
+        status: 'ACTIVE',
+        history: gameState.history,
+        user_investments: gameState.userInvestments
+    }).eq('id', 1);
+
+    return true;
+}
+
 // --- GAME LOOP (CRASH PROTECTED) ---
 setInterval(async () => {
   try {
       const now = Date.now();
       
-      // --- NEW: AUTO-BIDDER LOGIC ---
-      // Checks every second if any auto-bidders need to bid (e.g., last 5 seconds)
-      if (gameState.status === 'ACTIVE' && (gameState.endTime - now < 5000) && gameState.endTime - now > 0) {
-           // Iterate through autoBidders
-           for (const [email, config] of Object.entries(autoBidders)) {
-                if (config.active && config.current < config.maxBid && gameState.lastBidder !== email) {
-                     // Trigger a bid for this user
-                     // We emit to ourselves to trigger the 'placeBid' logic essentially
-                     // Or call logic directly. Calling placeBidLogic helper would be cleaner, but for now we wait for user trigger or client side.
-                     // NOTE: Server-side auto-execution requires refactoring placeBid into a standalone function.
-                     // For this upgrade, we will rely on client-side auto-bid requests or implement a basic version if refactored.
+      // --- 🤖 NEW: AUTO-BIDDER LOGIC ---
+      // Checks every second. If timer is < 10 seconds, auto-bidders attempt to bid.
+      if (gameState.status === 'ACTIVE' && (gameState.endTime - now < 10000) && (gameState.endTime - now > 0)) {
+           // Get active auto-bidders
+           const activeAutoBidders = Object.entries(autoBidders).filter(([e, cfg]) => cfg.active);
+           
+           for (const [email, config] of activeAutoBidders) {
+                // Rule: Don't bid if I am ALREADY winning
+                if (gameState.lastBidder !== email) {
+                     // Add slight randomness (60% chance per tick) to prevent robotic synchronization
+                     if (Math.random() > 0.4) { 
+                         await executeBid(email);
+                     }
                 }
            }
       }
@@ -249,21 +313,36 @@ setInterval(async () => {
           gameState.restartTimer = now + 15000;
 
           if (gameState.bidders.length > 1 && gameState.lastBidder) {
-              const win = gameState.lastBidder;
-              const amt = gameState.jackpot;
+              const winUser = gameState.lastBidder;
+              const winAmt = gameState.jackpot;
 
-              const { data: u } = await supabase.from('users').select('balance, total_won').eq('email', win).maybeSingle();
+              // 1. Credit Winner
+              const { data: u } = await supabase.from('users').select('balance, total_won, referred_by').eq('email', winUser).maybeSingle();
               
-              // NEW: Update Total Won Stats
-              const newTotalWon = (u.total_won || 0) + amt;
-              if (u) await supabase.from('users').update({ balance: u.balance + amt, total_won: newTotalWon }).eq('email', win);
+              if (u) {
+                  const newTotalWon = (u.total_won || 0) + winAmt;
+                  await supabase.from('users').update({ balance: u.balance + winAmt, total_won: newTotalWon }).eq('email', winUser);
 
-              gameState.recentWinners.unshift({ user: win, amount: amt, time: Date.now() });
+                  // --- 🎁 NEW: REFERRAL BONUS (5%) ---
+                  // If winner was referred, pay referrer 5% of the Jackpot
+                  if (u.referred_by) {
+                      const bonus = winAmt * 0.05;
+                      const { data: referrer } = await supabase.from('users').select('balance').eq('email', u.referred_by).maybeSingle();
+                      if (referrer) {
+                          await supabase.from('users').update({ balance: referrer.balance + bonus }).eq('email', u.referred_by);
+                          console.log(`🎁 Referral Bonus: $${bonus} sent to ${u.referred_by}`);
+                          sendTelegram(`🎁 *REFERRAL BONUS*\nRef: \`${u.referred_by}\`\nEarned: $${bonus.toFixed(2)}`);
+                      }
+                  }
+              }
+
+              gameState.recentWinners.unshift({ user: winUser, amount: winAmt, time: Date.now() });
               if (gameState.recentWinners.length > 5) gameState.recentWinners.pop();
 
-              sendTelegram(`🎉 *JACKPOT WON!*\nUser: \`${win}\`\nAmount: $${amt.toFixed(2)}`);
+              sendTelegram(`🎉 *JACKPOT WON!*\nUser: \`${winUser}\`\nAmount: $${winAmt.toFixed(2)}`);
 
           } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
+              // REFUND LOGIC
               const solePlayer = gameState.lastBidder;
               const refundAmount = gameState.userInvestments[solePlayer] || 0;
 
@@ -284,6 +363,7 @@ setInterval(async () => {
         }
       } else if (gameState.status === 'ENDED') {
         if (now >= gameState.restartTimer) {
+          // RESET GAME
           gameState = {
               ...gameState,
               status: 'ACTIVE',
@@ -614,8 +694,10 @@ io.on('connection', (socket) => {
   socket.on('toggleAutoBid', ({ email, active, maxBid }) => {
       if(active) {
           autoBidders[email] = { active: true, maxBid: maxBid || 10, current: 0 };
+          console.log(`🤖 Auto-Bidder ENABLED for ${email}`);
       } else {
           if(autoBidders[email]) autoBidders[email].active = false;
+          console.log(`🤖 Auto-Bidder DISABLED for ${email}`);
       }
   });
 
@@ -656,58 +738,12 @@ io.on('connection', (socket) => {
 
   // --- BID LOGIC ---
   socket.on('placeBid', async (rawEmail) => {
-    if (gameState.status !== 'ACTIVE') return;
     const email = rawEmail.toLowerCase().trim();
-    const now = Date.now();
-    if (now - (lastBidTimes[email]||0) < 500) return;
-
-    // --- 🛡️ SECURE ATOMIC TRANSACTION (Prevents Race Conditions) ---
-    const { data: success, error } = await supabase.rpc('deduct_balance', { 
-        user_email: email, 
-        amount: gameState.bidCost 
-    });
-
-    if (error || !success) { 
-        socket.emit('bidError', 'Insufficient Funds'); 
-        return; 
+    // CALL THE HELPER FUNCTION HERE INSTEAD OF DUPLICATING LOGIC
+    const result = await executeBid(email);
+    if (!result) {
+        socket.emit('bidError', 'Insufficient Funds or Cooldown');
     }
-    
-    // Fetch updated balance to show user immediately
-    const { data: u } = await supabase.from('users').select('balance, total_bidded').eq('email', email).single();
-    if (u) socket.emit('balanceUpdate', u.balance);
-    
-    // 🆕 UPDATE TOTAL BIDDED STATS
-    await supabase.from('users').update({ total_bidded: (u.total_bidded || 0) + gameState.bidCost }).eq('email', email);
-
-    // 🆕 SAVE BID TO DB & GET SEQUENTIAL ID
-    const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
-    // ---------------------------------------------------------------
-
-    lastBidTimes[email] = now;
-    gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
-    gameState.jackpot += (gameState.bidCost * 0.95);
-    gameState.lastBidder = email;
-    if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-    if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-    
-    // 🆕 USE DATABASE ID FOR SEQUENTIAL NUMBERING
-    const sequentialId = savedBid ? savedBid.id : Date.now(); // Fallback if DB fails (rare)
-    gameState.history.unshift({ id: sequentialId, user: email, amount: gameState.bidCost });
-    
-    if (gameState.history.length > 50) gameState.history.pop();
-    
-    io.emit('gameState', gameState);
-
-    // --- 🛡️ SAVE GAME STATE AFTER EVERY BID ---
-    await supabase.from('game_state').update({ 
-        jackpot: gameState.jackpot, 
-        end_time: gameState.endTime,
-        last_bidder: email,
-        status: 'ACTIVE',
-        history: gameState.history,
-        user_investments: gameState.userInvestments
-    }).eq('id', 1);
-    // ------------------------------------------
   });
 
   // --- DEPOSIT LOGIC ---
@@ -746,16 +782,6 @@ io.on('connection', (socket) => {
           const newBal = u.balance + dollarAmount;
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
           
-          // --- NEW: REFERRAL BONUS LOGIC ---
-          if (u.referred_by) {
-               const bonus = dollarAmount * 0.05; // 5% Bonus
-               const { data: referrer } = await supabase.from('users').select('balance').eq('email', u.referred_by).maybeSingle();
-               if(referrer) {
-                   await supabase.from('users').update({ balance: referrer.balance + bonus }).eq('email', u.referred_by);
-                   console.log(`🎁 Referral Bonus: $${bonus} sent to ${u.referred_by}`);
-               }
-          }
-
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
           sendTelegram(`💰 *DEPOSIT SUCCESS*\nUser: \`${email}\`\nAmt: $${dollarAmount.toFixed(2)}`);

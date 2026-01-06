@@ -70,7 +70,7 @@ const resend = new Resend(RESEND_API_KEY);
 const sendTelegram = (message) => {
     if (!bot || !TELEGRAM_CHAT_ID) return;
     bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' })
-       .catch(err => console.error("Telegram Error:", err.message));
+        .catch(err => console.error("Telegram Error:", err.message));
 };
 
 // --- HELPER: OTP GENERATOR & STORE ---
@@ -174,7 +174,8 @@ let lastBidTimes = {};
 let chatHistory = []; // NEW: Store recent chat messages
 
 // NEW: Auto-Bidders Store
-let autoBidders = {}; // { email: { maxBid: 10, current: 0, active: true } }
+// { email: { maxBid: 10, current: 0, active: true, lastAction: TIMESTAMP } }
+let autoBidders = {}; 
 
 let gameState = {
     status: 'ACTIVE',
@@ -225,7 +226,6 @@ loadGameState();
 
 // --- ⚡ NEW HELPER: EXECUTE BID ---
 // This function handles the bidding logic centrally.
-// It is used by both the "placeBid" socket event AND the Auto-Bidder loop.
 async function executeBid(email) {
     if (gameState.status !== 'ACTIVE') return false;
     
@@ -290,18 +290,21 @@ setInterval(async () => {
   try {
       const now = Date.now();
       
-      // --- 🤖 NEW: AUTO-BIDDER LOGIC ---
-      // Checks every second. If timer is < 10 seconds, auto-bidders attempt to bid.
-      if (gameState.status === 'ACTIVE' && (gameState.endTime - now < 10000) && (gameState.endTime - now > 0)) {
+      // --- 🤖 UPDATED: AUTO-BIDDER LOGIC (EVERY 20 SECONDS) ---
+      if (gameState.status === 'ACTIVE' && (gameState.endTime - now > 0)) {
            // Get active auto-bidders
            const activeAutoBidders = Object.entries(autoBidders).filter(([e, cfg]) => cfg.active);
            
            for (const [email, config] of activeAutoBidders) {
-                // Rule: Don't bid if I am ALREADY winning
+                // Rule 1: Don't bid if I am ALREADY winning
                 if (gameState.lastBidder !== email) {
-                     // Add slight randomness (60% chance per tick) to prevent robotic synchronization
-                     if (Math.random() > 0.4) { 
-                         await executeBid(email);
+                     // Rule 2: Strict 20 second interval
+                     const lastActionTime = config.lastAction || 0;
+                     if (now - lastActionTime >= 20000) {
+                         const bidSuccess = await executeBid(email);
+                         if(bidSuccess) {
+                             autoBidders[email].lastAction = now; // Update timestamp
+                         }
                      }
                 }
            }
@@ -323,8 +326,7 @@ setInterval(async () => {
                   const newTotalWon = (u.total_won || 0) + winAmt;
                   await supabase.from('users').update({ balance: u.balance + winAmt, total_won: newTotalWon }).eq('email', winUser);
 
-                  // --- 🎁 NEW: REFERRAL BONUS (5%) ---
-                  // If winner was referred, pay referrer 5% of the Jackpot
+                  // --- 🎁 REFERRAL BONUS (5%) ---
                   if (u.referred_by) {
                       const bonus = winAmt * 0.05;
                       const { data: referrer } = await supabase.from('users').select('balance').eq('email', u.referred_by).maybeSingle();
@@ -685,15 +687,17 @@ io.on('connection', (socket) => {
            time: Date.now()
        };
        chatHistory.push(chatObj);
-       if(chatHistory.length > 50) chatHistory.shift();
+       // 🆙 CHANGE: Increased chat history from 50 to 200
+       if(chatHistory.length > 200) chatHistory.shift();
        
        io.emit('chatMessage', chatObj);
   });
 
-  // Enable/Disable Auto-Bid (Basic Implementation)
+  // Enable/Disable Auto-Bid (With 20s Logic)
   socket.on('toggleAutoBid', ({ email, active, maxBid }) => {
       if(active) {
-          autoBidders[email] = { active: true, maxBid: maxBid || 10, current: 0 };
+          // Initialize lastAction to 0 so it can bid immediately if conditions met
+          autoBidders[email] = { active: true, maxBid: maxBid || 10, current: 0, lastAction: 0 };
           console.log(`🤖 Auto-Bidder ENABLED for ${email}`);
       } else {
           if(autoBidders[email]) autoBidders[email].active = false;
@@ -716,7 +720,14 @@ io.on('connection', (socket) => {
         const refCode = generateReferralCode();
         const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player', referral_code: refCode }]).select().maybeSingle();
         u = insertError ? { balance: 0.00, username: 'Player' } : newUser;
+    } 
+    // 🛡️ REFFERAL FIX: If user exists but has no referral code (older user), generate one now.
+    else if (!u.referral_code) {
+        const newRef = generateReferralCode();
+        await supabase.from('users').update({ referral_code: newRef }).eq('email', email);
+        u.referral_code = newRef;
     }
+
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
     // Send extra user data
     socket.emit('userData', u);

@@ -174,7 +174,7 @@ let lastBidTimes = {};
 let chatHistory = []; 
 
 // NEW: Auto-Bidders Store
-// { email: { maxBid: 10, current: 0, active: true, lastAction: TIMESTAMP } }
+// { email: { active: true, lastAction: TIMESTAMP } }
 let autoBidders = {};
 
 let gameState = {
@@ -290,13 +290,13 @@ setInterval(async () => {
   try {
       const now = Date.now();
 
-      // --- 🤖 UPDATED: AUTO-BIDDER LOGIC (EVERY 20 SECONDS) ---
+      // --- 🤖 UPDATED: AUTO-BIDDER LOGIC (EVERY 20 SECONDS UNTIL EMPTY) ---
       if (gameState.status === 'ACTIVE' && (gameState.endTime - now > 0)) {
            // Get active auto-bidders
            const activeAutoBidders = Object.entries(autoBidders).filter(([e, cfg]) => cfg.active);
 
            for (const [email, config] of activeAutoBidders) {
-                // Rule 1: Don't bid if I am ALREADY winning (Standard Logic)
+                // Rule 1: Don't bid if I am ALREADY winning
                 if (gameState.lastBidder !== email) {
                      // Rule 2: Strict 20 second interval (20000ms)
                      const lastActionTime = config.lastAction || 0;
@@ -304,6 +304,14 @@ setInterval(async () => {
                          const bidSuccess = await executeBid(email);
                          if(bidSuccess) {
                              autoBidders[email].lastAction = now; // Update timestamp
+                         } else {
+                             // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
+                             const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
+                             if(u && u.balance < gameState.bidCost) {
+                                 autoBidders[email].active = false;
+                                 io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
+                                 console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
+                             }
                          }
                      }
                 }
@@ -693,12 +701,12 @@ io.on('connection', (socket) => {
        io.emit('chatMessage', chatObj);
   });
 
-  // Enable/Disable Auto-Bid (With 20s Logic)
-  socket.on('toggleAutoBid', ({ email, active, maxBid }) => {
+  // Enable/Disable Auto-Bid (With 20s Logic & No Limits)
+  socket.on('toggleAutoBid', ({ email, active }) => {
       if(active) {
           // Initialize lastAction to 0 so it can bid immediately if conditions met
-          autoBidders[email] = { active: true, maxBid: maxBid || 10, current: 0, lastAction: 0 };
-          console.log(`🤖 Auto-Bidder ENABLED for ${email}`);
+          autoBidders[email] = { active: true, lastAction: 0 };
+          console.log(`🤖 Auto-Bidder ENABLED for ${email} (Unlimited Mode)`);
       } else {
           if(autoBidders[email]) autoBidders[email].active = false;
           console.log(`🤖 Auto-Bidder DISABLED for ${email}`);

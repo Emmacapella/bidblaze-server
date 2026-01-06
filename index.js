@@ -94,10 +94,10 @@ const sendEmailOTP = async (email, otp, type) => {
             <p style="color: #64748b; font-size: 12px; margin-top: 20px;">This code expires in 5 minutes.</p>
         </div>
         `;
-        
+
         // 📧 Updated to use your verified domain
         const { data, error } = await resend.emails.send({
-            from: 'BidBlaze <Noreply@bidblaze.com>', 
+            from: 'BidBlaze <Noreply@bidblaze.com>',
             to: [email],
             subject: subject,
             html: html
@@ -160,8 +160,8 @@ const server = http.createServer(app);
 
 // --- 🛡️ SECURITY FIX #4: SOCKET CORS ---
 const io = new Server(server, {
-    cors: { 
-        origin: allowedOrigins, 
+    cors: {
+        origin: allowedOrigins,
         methods: ["GET", "POST"],
         credentials: true
     },
@@ -171,11 +171,12 @@ const io = new Server(server, {
 
 // 🛡️ SECURITY: Track User Cooldowns Server-Side
 let lastBidTimes = {};
-let chatHistory = []; // NEW: Store recent chat messages
+// 🆙 CHANGE: Chat history array buffer
+let chatHistory = []; 
 
 // NEW: Auto-Bidders Store
 // { email: { maxBid: 10, current: 0, active: true, lastAction: TIMESTAMP } }
-let autoBidders = {}; 
+let autoBidders = {};
 
 let gameState = {
     status: 'ACTIVE',
@@ -195,19 +196,19 @@ let gameState = {
 async function loadGameState() {
   try {
     const { data } = await supabase.from('game_state').select('*').eq('id', 1).maybeSingle();
-    
+
     if (data) {
       if (parseInt(data.end_time) > Date.now()) {
           gameState.jackpot = parseFloat(data.jackpot);
           gameState.endTime = parseInt(data.end_time);
           gameState.status = data.status;
           gameState.lastBidder = data.last_bidder;
-          
+
           // 🛑 RESTORE LISTS FROM DB
           gameState.history = data.history || [];
           gameState.recentWinners = data.recent_winners || [];
           gameState.userInvestments = data.user_investments || {};
-          
+
           // Re-populate bidders list from investments keys
           gameState.bidders = Object.keys(gameState.userInvestments);
 
@@ -221,23 +222,23 @@ async function loadGameState() {
     console.error("Failed to load game state:", e);
   }
 }
-loadGameState(); 
+loadGameState();
 // -----------------------------------------------------------
 
 // --- ⚡ NEW HELPER: EXECUTE BID ---
 // This function handles the bidding logic centrally.
 async function executeBid(email) {
     if (gameState.status !== 'ACTIVE') return false;
-    
+
     // Server-side Cooldown Check (500ms)
     const now = Date.now();
     if (now - (lastBidTimes[email]||0) < 500) return false;
 
     // 1. Atomic Balance Deduction (Safe against race conditions)
     // REQUIRES the 'deduct_balance' SQL function in Supabase
-    const { data: success, error } = await supabase.rpc('deduct_balance', { 
-        user_email: email, 
-        amount: gameState.bidCost 
+    const { data: success, error } = await supabase.rpc('deduct_balance', {
+        user_email: email,
+        amount: gameState.bidCost
     });
 
     if (error || !success) return false; // Fail if insufficient funds
@@ -253,28 +254,28 @@ async function executeBid(email) {
 
     // 3. Record Bid in DB
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
-    
+
     // 4. Update Game State
     lastBidTimes[email] = now;
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
-    
+
     // Extend Timer Logic
     if (gameState.endTime - Date.now() < 10000) gameState.endTime = Date.now() + 10000;
-    
+
     // Update History
     const sequentialId = savedBid ? savedBid.id : Date.now();
     gameState.history.unshift({ id: sequentialId, user: email, amount: gameState.bidCost });
     if (gameState.history.length > 50) gameState.history.pop();
-    
+
     // Broadcast to all clients
     io.emit('gameState', gameState);
 
     // 5. Save State to DB
-    await supabase.from('game_state').update({ 
-        jackpot: gameState.jackpot, 
+    await supabase.from('game_state').update({
+        jackpot: gameState.jackpot,
         end_time: gameState.endTime,
         last_bidder: email,
         status: 'ACTIVE',
@@ -289,16 +290,16 @@ async function executeBid(email) {
 setInterval(async () => {
   try {
       const now = Date.now();
-      
+
       // --- 🤖 UPDATED: AUTO-BIDDER LOGIC (EVERY 20 SECONDS) ---
       if (gameState.status === 'ACTIVE' && (gameState.endTime - now > 0)) {
            // Get active auto-bidders
            const activeAutoBidders = Object.entries(autoBidders).filter(([e, cfg]) => cfg.active);
-           
+
            for (const [email, config] of activeAutoBidders) {
-                // Rule 1: Don't bid if I am ALREADY winning
+                // Rule 1: Don't bid if I am ALREADY winning (Standard Logic)
                 if (gameState.lastBidder !== email) {
-                     // Rule 2: Strict 20 second interval
+                     // Rule 2: Strict 20 second interval (20000ms)
                      const lastActionTime = config.lastAction || 0;
                      if (now - lastActionTime >= 20000) {
                          const bidSuccess = await executeBid(email);
@@ -321,7 +322,7 @@ setInterval(async () => {
 
               // 1. Credit Winner
               const { data: u } = await supabase.from('users').select('balance, total_won, referred_by').eq('email', winUser).maybeSingle();
-              
+
               if (u) {
                   const newTotalWon = (u.total_won || 0) + winAmt;
                   await supabase.from('users').update({ balance: u.balance + winAmt, total_won: newTotalWon }).eq('email', winUser);
@@ -356,9 +357,9 @@ setInterval(async () => {
                   }
               }
           }
-          
+
            // 🛑 SAVE WINNERS IMMEDIATELY AFTER GAME END
-           await supabase.from('game_state').update({ 
+           await supabase.from('game_state').update({
               recent_winners: gameState.recentWinners,
               status: 'ENDED'
           }).eq('id', 1);
@@ -378,12 +379,12 @@ setInterval(async () => {
               recentWinners: gameState.recentWinners // Keep winners
           };
           lastBidTimes = {};
-          
+
           io.emit('gameState', gameState);
 
           // --- 🛡️ SAVE RESET TO DB ---
-          supabase.from('game_state').update({ 
-              jackpot: 0.00, 
+          supabase.from('game_state').update({
+              jackpot: 0.00,
               end_time: gameState.endTime,
               status: 'ACTIVE',
               last_bidder: null,
@@ -429,7 +430,7 @@ io.on('connection', (socket) => {
 
   // --- NEW: CHAT & LEADERBOARD ON CONNECT ---
   socket.emit('chatHistory', chatHistory);
-  
+
   // NEW: Leaderboard Fetcher
   const sendLeaderboard = async () => {
       const { data } = await supabase.from('users').select('username, total_won, total_bidded').order('total_won', { ascending: false }).limit(10);
@@ -510,10 +511,10 @@ io.on('connection', (socket) => {
           }
 
           const hashedPassword = await bcrypt.hash(password, 10);
-          
+
           // NEW: Generate Referral Code for this user
           const myRefCode = generateReferralCode();
-          
+
           // NEW: Handle Referred By
           let referredBy = null;
           if (referralCode) {
@@ -523,10 +524,10 @@ io.on('connection', (socket) => {
 
           const { data: inserted, error: inErr } = await supabase
               .from('users')
-              .insert([{ 
-                  username: cleanUsername, 
-                  email: cleanEmail, 
-                  password_hash: hashedPassword, 
+              .insert([{
+                  username: cleanUsername,
+                  email: cleanEmail,
+                  password_hash: hashedPassword,
                   balance: 0.00,
                   referral_code: myRefCode,
                   referred_by: referredBy,
@@ -544,7 +545,7 @@ io.on('connection', (socket) => {
           socket.emit('authSuccess', { username: inserted.username, email: inserted.email, balance: inserted.balance, referralCode: myRefCode });
           socket.emit('depositHistory', []);
           socket.emit('withdrawalHistory', []);
-          socket.emit('userBids', []); 
+          socket.emit('userBids', []);
 
           console.log(`🆕 User Verified & Registered: ${inserted.username}`);
 
@@ -626,9 +627,9 @@ io.on('connection', (socket) => {
           const isPasswordValid = user.password_hash && (await bcrypt.compare(password, user.password_hash));
           if (!isPasswordValid) { socket.emit('authError', 'Incorrect password.'); return; }
 
-          socket.emit('authSuccess', { 
-              username: user.username, 
-              email: user.email, 
+          socket.emit('authSuccess', {
+              username: user.username,
+              email: user.email,
               balance: user.balance,
               referralCode: user.referral_code,
               totalWon: user.total_won,
@@ -658,12 +659,12 @@ io.on('connection', (socket) => {
   // ----------------------------------------------------------------------
 
   // --- NEW: PROFILE & CHAT LISTENERS ---
-  
+
   // Update Profile
   socket.on('updateProfile', async ({ email, username }) => {
        const cleanEmail = email.toLowerCase().trim();
        const cleanUser = username.trim();
-       
+
        // Check if username taken
        const { data: existing } = await supabase.from('users').select('id').eq('username', cleanUser).neq('email', cleanEmail).maybeSingle();
        if (existing) {
@@ -671,7 +672,7 @@ io.on('connection', (socket) => {
        }
 
        await supabase.from('users').update({ username: cleanUser }).eq('email', cleanEmail);
-       
+
        // Broadcast name change in chat if needed, or just update local
        console.log(`User ${email} changed name to ${cleanUser}`);
   });
@@ -679,7 +680,7 @@ io.on('connection', (socket) => {
   // Chat Message
   socket.on('sendChatMessage', async ({ email, message, username }) => {
        if(!message || message.length > 200) return;
-       
+
        const chatObj = {
            id: Date.now(),
            user: username || "Player",
@@ -689,7 +690,7 @@ io.on('connection', (socket) => {
        chatHistory.push(chatObj);
        // 🆙 CHANGE: Increased chat history from 50 to 200
        if(chatHistory.length > 200) chatHistory.shift();
-       
+
        io.emit('chatMessage', chatObj);
   });
 
@@ -720,7 +721,7 @@ io.on('connection', (socket) => {
         const refCode = generateReferralCode();
         const { data: newUser, error: insertError } = await supabase.from('users').insert([{ email, balance: 0.00, username: 'Player', referral_code: refCode }]).select().maybeSingle();
         u = insertError ? { balance: 0.00, username: 'Player' } : newUser;
-    } 
+    }
     // 🛡️ REFFERAL FIX: If user exists but has no referral code (older user), generate one now.
     else if (!u.referral_code) {
         const newRef = generateReferralCode();
@@ -792,7 +793,7 @@ io.on('connection', (socket) => {
           }
           const newBal = u.balance + dollarAmount;
           await supabase.from('users').update({ balance: newBal }).eq('email', email);
-          
+
           socket.emit('depositSuccess', newBal);
           socket.emit('balanceUpdate', newBal);
           sendTelegram(`💰 *DEPOSIT SUCCESS*\nUser: \`${email}\`\nAmt: $${dollarAmount.toFixed(2)}`);

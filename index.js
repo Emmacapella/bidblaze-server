@@ -95,9 +95,9 @@ const sendEmailOTP = async (email, otp, type) => {
         </div>
         `;
 
-        // 📧 Updated to use your verified domain
+        // 📧 UPDATED: Changed .com to .xyz to match your verified domain
         const { data, error } = await resend.emails.send({
-            from: 'BidBlaze <Noreply@bidblaze.com>',
+            from: 'BidBlaze <noreply@bidblaze.xyz>', 
             to: [email],
             subject: subject,
             html: html
@@ -171,7 +171,6 @@ const io = new Server(server, {
 
 // 🛡️ SECURITY: Track User Cooldowns Server-Side
 let lastBidTimes = {};
-// 🆙 CHANGE: Chat history array buffer
 let chatHistory = []; 
 
 // NEW: Auto-Bidders Store

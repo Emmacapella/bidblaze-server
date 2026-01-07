@@ -229,9 +229,15 @@ loadGameState();
 async function executeBid(email) {
     if (gameState.status !== 'ACTIVE') return false;
 
-    // Server-side Cooldown Check (500ms)
+    // 🛡️ STRICT 8-SECOND COOLDOWN (SERVER-SIDE)
+    // Applies to BOTH Manual and Auto Bids
     const now = Date.now();
-    if (now - (lastBidTimes[email]||0) < 500) return false;
+    const lastBid = lastBidTimes[email] || 0;
+    
+    // If less than 8 seconds (8000ms) since last bid, REJECT
+    if (now - lastBid < 8000) {
+        return false; 
+    }
 
     // 1. Atomic Balance Deduction (Safe against race conditions)
     // REQUIRES the 'deduct_balance' SQL function in Supabase
@@ -255,7 +261,7 @@ async function executeBid(email) {
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
 
     // 4. Update Game State
-    lastBidTimes[email] = now;
+    lastBidTimes[email] = now; // Update last bid time for cooldown check
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
     gameState.lastBidder = email;
@@ -301,13 +307,15 @@ setInterval(async () => {
                      // Rule 2: Strict 20 second interval (20000ms)
                      const lastActionTime = config.lastAction || 0;
                      if (now - lastActionTime >= 20000) {
+                         // Attempt bid (executeBid will handle the 8s check, though 20s > 8s so it's fine)
                          const bidSuccess = await executeBid(email);
                          if(bidSuccess) {
                              autoBidders[email].lastAction = now; // Update timestamp
                          } else {
-                             // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
+                             // Check if it failed due to funds
                              const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
                              if(u && u.balance < gameState.bidCost) {
+                                 // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
                                  autoBidders[email].active = false;
                                  io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
                                  console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
@@ -704,8 +712,11 @@ io.on('connection', (socket) => {
   // Enable/Disable Auto-Bid (With 20s Logic & No Limits)
   socket.on('toggleAutoBid', ({ email, active }) => {
       if(active) {
-          // Initialize lastAction to 0 so it can bid immediately if conditions met
-          autoBidders[email] = { active: true, lastAction: 0 };
+          // 🛡️ RECONNECTION FIX:
+          // If user already has an active session, PRESERVE the lastAction time.
+          // If not, set to 0 to start bidding immediately.
+          const existingAction = (autoBidders[email] && autoBidders[email].lastAction) ? autoBidders[email].lastAction : 0;
+          autoBidders[email] = { active: true, lastAction: existingAction };
           console.log(`🤖 Auto-Bidder ENABLED for ${email} (Unlimited Mode)`);
       } else {
           if(autoBidders[email]) autoBidders[email].active = false;
@@ -758,10 +769,17 @@ io.on('connection', (socket) => {
   // --- BID LOGIC ---
   socket.on('placeBid', async (rawEmail) => {
     const email = rawEmail.toLowerCase().trim();
+    
+    // 🛑 BLOCK MANUAL BIDS IF AUTO-BID IS ON
+    if (autoBidders[email] && autoBidders[email].active) {
+        socket.emit('bidError', 'Please turn off Auto-Bidder to bid manually.');
+        return;
+    }
+
     // CALL THE HELPER FUNCTION HERE INSTEAD OF DUPLICATING LOGIC
     const result = await executeBid(email);
     if (!result) {
-        socket.emit('bidError', 'Insufficient Funds or Cooldown');
+        socket.emit('bidError', 'Cooldown Active (8s) or Insufficient Funds');
     }
   });
 

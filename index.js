@@ -222,7 +222,7 @@ async function executeBid(email, roomKey, isAutoBid = false) {
     const lastBid = lastBidTimes[email] || 0;
     if (now - lastBid < 8000) return false; 
 
-    // 1. Deduct Balance
+    // 1. Deduct Balance (FULL AMOUNT)
     const { data: success, error } = await supabase.rpc('deduct_balance', {
         user_email: email,
         amount: state.bidCost
@@ -251,9 +251,13 @@ async function executeBid(email, roomKey, isAutoBid = false) {
     }
 
     lastBidTimes[email] = now;
+    
+    // Track TOTAL invested (GROSS) for refunds
     state.userInvestments[email] = (state.userInvestments[email] || 0) + state.bidCost;
     
     // 🔥 HOUSE FEE LOGIC: 5% to House, 95% to Jackpot
+    // 0.10 bid -> 0.095 to pot
+    // 1.00 bid -> 0.95 to pot
     const contribution = state.bidCost * 0.95;
     state.jackpot += contribution;
 
@@ -316,6 +320,7 @@ setInterval(async () => {
                   state.restartTimer = now + 15000; 
 
                   if (state.bidders.length > 1 && state.lastBidder) {
+                      // WINNER LOGIC
                       let winUser = state.lastBidder;
                       let winAmt = state.jackpot;
 
@@ -348,13 +353,17 @@ setInterval(async () => {
                           sendTelegram(`🎉 *${roomKey.toUpperCase()} POT WON!*\nUser: \`${winUser}\`\nAmt: $${winAmt.toFixed(2)}`);
                       }
                   } else if (state.bidders.length === 1 && state.lastBidder) {
+                      // ♻️ REFUND LOGIC (SINGLE BIDDER)
                       let solePlayer = state.lastBidder;
                       let { data: check } = await supabase.from('users').select('id').eq('email', solePlayer).maybeSingle();
                       if (!check) {
                            const { data: lastBid } = await supabase.from('bids').select('user_email').order('id', {ascending: false}).limit(1).single();
                            if (lastBid) solePlayer = lastBid.user_email;
                       }
+                      
+                      // REFUND THE FULL GROSS INVESTMENT (INCLUDES THE HOUSE FEE)
                       const refundAmt = state.userInvestments[solePlayer] || 0;
+                      
                       if (refundAmt > 0) {
                            const { data: u } = await supabase.from('users').select('balance').eq('email', solePlayer).maybeSingle();
                            if (u) {

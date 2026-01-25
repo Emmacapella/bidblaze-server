@@ -19,7 +19,7 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 
-// --- TELEGRAM CONFIG (RESTORED FROM OLD CODE) ---
+// --- TELEGRAM CONFIG ---
 let bot = null;
 try {
     const TelegramBot = require('node-telegram-bot-api');
@@ -35,7 +35,7 @@ try {
 
 const app = express();
 
-// --- CORS (RESTORED FROM OLD CODE) ---
+// --- CORS ---
 const allowedOrigins = [
   "https://bidblaze.xyz",
   "https://www.bidblaze.xyz",
@@ -62,7 +62,7 @@ app.get('/health', (req, res) => {
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const resend = new Resend(RESEND_API_KEY);
 
-// --- HELPER: TELEGRAM ALERT (RESTORED) ---
+// --- HELPER: TELEGRAM ALERT ---
 const sendTelegram = (message) => {
     if (!bot || !TELEGRAM_CHAT_ID) return;
     bot.sendMessage(TELEGRAM_CHAT_ID, message, { parse_mode: 'Markdown' })
@@ -75,7 +75,7 @@ const otpStore = new Map();
 const generateOTP = () => Math.floor(100000 + Math.random() * 900000).toString();
 const generateReferralCode = () => Math.random().toString(36).substring(2, 8).toUpperCase();
 
-// --- EMAIL OTP LOGIC (RESTORED FROM OLD CODE) ---
+// --- EMAIL OTP LOGIC ---
 const sendEmailOTP = async (email, otp, type) => {
     if (!resend) {
         console.error("❌ Cannot send OTP. RESEND_API_KEY is missing.");
@@ -241,7 +241,6 @@ async function executeBid(email, roomKey, isAutoBid = false) {
     const { data: savedBid } = await supabase.from('bids').insert([{ 
         user_email: email, 
         amount: state.bidCost,
-        // room_id: roomKey // Only if you added room_id column
     }]).select().single();
 
     // 4. Alias Logic
@@ -253,7 +252,11 @@ async function executeBid(email, roomKey, isAutoBid = false) {
 
     lastBidTimes[email] = now;
     state.userInvestments[email] = (state.userInvestments[email] || 0) + state.bidCost;
-    state.jackpot += (state.bidCost * 0.95);
+    
+    // 🔥 HOUSE FEE LOGIC: 5% to House, 95% to Jackpot
+    const contribution = state.bidCost * 0.95;
+    state.jackpot += contribution;
+
     state.lastBidder = displayUser;
     if (!state.bidders.includes(email)) state.bidders.push(email);
 
@@ -342,7 +345,6 @@ setInterval(async () => {
                           state.recentWinners.unshift({ user: state.lastBidder, amount: winAmt, time: Date.now() });
                           if (state.recentWinners.length > 5) state.recentWinners.pop();
                           
-                          // --- TELEGRAM ALERT (RESTORED) ---
                           sendTelegram(`🎉 *${roomKey.toUpperCase()} POT WON!*\nUser: \`${winUser}\`\nAmt: $${winAmt.toFixed(2)}`);
                       }
                   } else if (state.bidders.length === 1 && state.lastBidder) {
@@ -407,7 +409,6 @@ io.on('connection', (socket) => {
         socket.emit('gameConfig', { adminWallet: ADMIN_WALLET, connectedUsers: connectedUserCount });
     });
 
-    // --- NEW ROOM LOGIC ---
     socket.on('joinRoom', (roomType) => {
         if (!['low', 'high'].includes(roomType)) return;
         socket.join(roomType);
@@ -418,7 +419,6 @@ io.on('connection', (socket) => {
         socket.leave(roomType);
     });
 
-    // --- CHAT & LEADERBOARD ---
     socket.emit('chatHistory', chatHistory);
     const sendLeaderboard = async () => {
         const { data } = await supabase.from('users').select('username, total_won, total_bidded').order('total_won', { ascending: false }).limit(10);
@@ -427,10 +427,9 @@ io.on('connection', (socket) => {
     sendLeaderboard();
 
     // -----------------------------------------------------------
-    // --- 🔐 AUTHENTICATION (RESTORED FROM OLD CODE) ---
+    // --- 🔐 AUTHENTICATION ---
     // -----------------------------------------------------------
 
-    // 1. REQUEST SIGNUP OTP
     socket.on('requestSignupOtp', async ({ email }) => {
         if (!email) return socket.emit('authError', 'Email is required.');
         const cleanEmail = email.toLowerCase().trim();
@@ -449,7 +448,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 2. REGISTER
     socket.on('register', async ({ username, email, password, otp, referralCode }) => {
          if (!username || !email || !password || !otp) return socket.emit('authError', 'All fields required');
          const cleanEmail = email.toLowerCase().trim();
@@ -482,7 +480,6 @@ io.on('connection', (socket) => {
          }
     });
 
-    // 3. LOGIN
     socket.on('login', async ({ email, password }) => {
         const cleanEmail = email.toLowerCase().trim();
         const { data: user } = await supabase.from('users').select('*').eq('email', cleanEmail).maybeSingle();
@@ -501,7 +498,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // 4. REQUEST RESET OTP
     socket.on('requestResetOtp', async ({ email }) => {
         const cleanEmail = email.toLowerCase().trim();
         const { data: user } = await supabase.from('users').select('id').eq('email', cleanEmail).maybeSingle();
@@ -515,7 +511,6 @@ io.on('connection', (socket) => {
         else socket.emit('authError', 'Failed to send reset email.');
     });
 
-    // 5. CONFIRM RESET
     socket.on('resetPassword', async ({ email, otp, newPassword }) => {
         const cleanEmail = email.toLowerCase().trim();
         const storedOtp = otpStore.get(cleanEmail);
@@ -529,7 +524,6 @@ io.on('connection', (socket) => {
 
     // -----------------------------------------------------------
 
-    // --- BIDDING ---
     socket.on('placeBid', async ({ room, email: rawEmail }) => {
         const email = rawEmail.toLowerCase().trim();
         if (autoBidders[email] && autoBidders[email].active) {
@@ -540,19 +534,16 @@ io.on('connection', (socket) => {
         if (!success) socket.emit('bidError', 'Cooldown or Low Balance');
     });
 
-    // --- AUTO BID TOGGLE ---
     socket.on('toggleAutoBid', ({ email, active }) => {
         if(active) autoBidders[email] = { active: true, lastAction: 0 };
         else if(autoBidders[email]) autoBidders[email].active = false;
     });
 
-    // --- BALANCE & PROFILE ---
     socket.on('getUserBalance', async (rawEmail) => {
         const email = rawEmail.toLowerCase().trim();
         socket.join(email);
         let { data: u } = await supabase.from('users').select('*').eq('email', email).maybeSingle();
         if (!u) {
-             // Wallet auto-create
              const { data: n } = await supabase.from('users').insert([{ email, balance: 0, username: 'Player', referral_code: generateReferralCode() }]).select().single();
              u = n;
         }
@@ -572,7 +563,6 @@ io.on('connection', (socket) => {
         io.emit('chatMessage', msg);
     });
 
-    // --- TRANSACTIONS (RESTORED TELEGRAM ALERTS) ---
     socket.on('verifyDeposit', async ({ email: rawEmail, txHash, network }) => {
          const email = rawEmail.toLowerCase().trim();
          try {
@@ -582,7 +572,6 @@ io.on('connection', (socket) => {
              if (!tx) { socket.emit('depositError', 'Timeout'); return; }
              
              const txDetails = await provider.getTransaction(txHash);
-             // Verify TO address matches ADMIN
              if(txDetails.to.toLowerCase() !== ADMIN_WALLET.toLowerCase()) {
                  socket.emit('depositError', 'Wrong Address'); return;
              }

@@ -251,13 +251,9 @@ async function executeBid(email, roomKey, isAutoBid = false) {
     }
 
     lastBidTimes[email] = now;
-    
-    // Track TOTAL invested (GROSS) for refunds
     state.userInvestments[email] = (state.userInvestments[email] || 0) + state.bidCost;
     
     // 🔥 HOUSE FEE LOGIC: 5% to House, 95% to Jackpot
-    // 0.10 bid -> 0.095 to pot
-    // 1.00 bid -> 0.95 to pot
     const contribution = state.bidCost * 0.95;
     state.jackpot += contribution;
 
@@ -285,7 +281,7 @@ async function executeBid(email, roomKey, isAutoBid = false) {
     return true;
 }
 
-// --- MAIN GAME LOOP (Running at 100ms for precision) ---
+// --- MAIN GAME LOOP ---
 setInterval(async () => {
   try {
       const now = Date.now();
@@ -361,7 +357,6 @@ setInterval(async () => {
                            if (lastBid) solePlayer = lastBid.user_email;
                       }
                       
-                      // REFUND THE FULL GROSS INVESTMENT (INCLUDES THE HOUSE FEE)
                       const refundAmt = state.userInvestments[solePlayer] || 0;
                       
                       if (refundAmt > 0) {
@@ -495,11 +490,15 @@ io.on('connection', (socket) => {
         if (user && await bcrypt.compare(password, user.password_hash)) {
             socket.emit('authSuccess', { ...user, referralCode: user.referral_code });
             
+            // 🔥 FIXED: FETCH HISTORY ON LOGIN
             const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
             socket.emit('withdrawalHistory', w || []);
             
             const { data: d } = await supabase.from('deposits').select('*').eq('user_email', cleanEmail).order('created_at', { ascending: false });
             socket.emit('depositHistory', d || []);
+
+            const { data: r } = await supabase.from('users').select('username, created_at, total_won').eq('referred_by', cleanEmail);
+            socket.emit('referralData', r || []);
             
             console.log(`✅ User Logged In: ${user.username}`);
         } else {
@@ -531,8 +530,6 @@ io.on('connection', (socket) => {
         socket.emit('resetSuccess');
     });
 
-    // -----------------------------------------------------------
-
     socket.on('placeBid', async ({ room, email: rawEmail }) => {
         const email = rawEmail.toLowerCase().trim();
         if (autoBidders[email] && autoBidders[email].active) {
@@ -558,6 +555,16 @@ io.on('connection', (socket) => {
         }
         socket.emit('balanceUpdate', u.balance);
         socket.emit('userData', u);
+
+        // 🔥 FIXED: FETCH HISTORY ON REFRESH
+        const { data: w } = await supabase.from('withdrawals').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        socket.emit('withdrawalHistory', w || []);
+        
+        const { data: d } = await supabase.from('deposits').select('*').eq('user_email', email).order('created_at', { ascending: false });
+        socket.emit('depositHistory', d || []);
+
+        const { data: r } = await supabase.from('users').select('username, created_at, total_won').eq('referred_by', email);
+        socket.emit('referralData', r || []);
     });
 
     socket.on('updateProfile', async ({ email, username }) => {
